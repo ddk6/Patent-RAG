@@ -77,43 +77,12 @@ export const useKnowledgeBaseStore = defineStore(SetupStoreId.KnowledgeBase, () 
     }
   }
 
-  /**
-   * 异步函数：将上传请求加入队列
-   *
-   * 本函数处理上传任务的排队和初始化工作它首先检查是否存在相同的文件， 如果不存在，则创建一个新的上传任务，并将其添加到任务队列中最后启动上传流程
-   *
-   * @param form 包含上传信息的表单，包括文件列表和是否公开的标签
-   * @returns 返回一个上传任务对象，无论是已存在的还是新创建的
-   */
-  async function enqueueUpload(form: Api.KnowledgeBase.Form) {
-    // 获取文件列表中的第一个文件
-    const file = form.fileList![0].file!;
-    // 计算文件的MD5值，用于唯一标识文件
-    const md5 = await calculateMD5(file);
-
-    // 检查是否已存在相同文件
-    const existingTask = tasks.value.find(t => t.fileMd5 === md5);
-    if (existingTask) {
-      // 如果存在相同文件，直接返回该上传任务
-      if (existingTask.status === UploadStatus.Completed) {
-        window.$message?.error('文件已存在');
-        return;
-      } else if (existingTask.status === UploadStatus.Pending || existingTask.status === UploadStatus.Uploading) {
-        window.$message?.error('文件正在上传中');
-        return;
-      } else if (existingTask.status === UploadStatus.Break) {
-        existingTask.status = UploadStatus.Pending;
-        startUpload();
-        return;
-      }
-    }
-
-    // 创建新的上传任务对象
-    const newTask: Api.KnowledgeBase.UploadTask = {
+  function buildUploadTask(form: Api.KnowledgeBase.Form, file: File, fileMd5: string): Api.KnowledgeBase.UploadTask {
+    return {
       file,
       chunk: null,
       chunkIndex: 0,
-      fileMd5: md5,
+      fileMd5,
       fileName: file.name,
       totalSize: file.size,
       public: form.isPublic,
@@ -121,16 +90,68 @@ export const useKnowledgeBaseStore = defineStore(SetupStoreId.KnowledgeBase, () 
       uploadedChunks: [],
       progress: 0,
       status: UploadStatus.Pending,
-      orgTag: form.orgTag
+      orgTag: form.orgTag,
+      orgTagName: form.orgTagName ?? null
     };
+  }
 
-    newTask.orgTagName = form.orgTagName ?? null;
+  function resetBrokenTask(task: Api.KnowledgeBase.UploadTask, form: Api.KnowledgeBase.Form, file: File) {
+    Object.assign(task, {
+      file,
+      chunk: null,
+      chunkIndex: task.chunkIndex ?? 0,
+      fileName: file.name,
+      totalSize: file.size,
+      public: form.isPublic,
+      isPublic: form.isPublic,
+      orgTag: form.orgTag,
+      orgTagName: form.orgTagName ?? null,
+      status: UploadStatus.Pending
+    });
+  }
 
-    // 将新的上传任务添加到任务队列中
-    tasks.value.push(newTask);
-    // 启动上传流程
-    startUpload();
-    // 返回新的上传任务
+  /** 将一个批次中的多个文件加入上传队列。 */
+  async function enqueueUpload(form: Api.KnowledgeBase.Form) {
+    const files = (form.fileList || []).map(item => item.file).filter((file): file is File => Boolean(file));
+
+    if (!files.length) {
+      window.$message?.error('请选择至少一个文件');
+      return { queued: 0, resumed: 0, skipped: 0 };
+    }
+
+    let queued = 0;
+    let resumed = 0;
+    let skipped = 0;
+
+    for (const file of files) {
+      // eslint-disable-next-line no-await-in-loop
+      const md5 = await calculateMD5(file);
+
+      const existingTask = tasks.value.find(t => t.fileMd5 === md5);
+      if (existingTask) {
+        if (existingTask.status === UploadStatus.Break) {
+          resetBrokenTask(existingTask, form, file);
+          resumed += 1;
+          startUpload();
+        } else {
+          skipped += 1;
+        }
+      } else {
+        tasks.value.push(buildUploadTask(form, file, md5));
+        queued += 1;
+        startUpload();
+      }
+    }
+
+    const activeCount = queued + resumed;
+    if (activeCount > 0) {
+      window.$message?.success(`${activeCount} 个文件已加入上传队列`);
+    }
+    if (skipped > 0) {
+      window.$message?.warning(`${skipped} 个文件已跳过，原因是已存在或正在上传`);
+    }
+
+    return { queued, resumed, skipped };
   }
 
   /** 启动文件上传的异步函数 该函数负责从待上传队列中启动文件上传任务，并管理并发上传的数量 */

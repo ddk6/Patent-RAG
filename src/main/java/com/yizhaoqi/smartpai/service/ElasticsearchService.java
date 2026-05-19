@@ -90,6 +90,25 @@ public class ElasticsearchService {
         }
     }
 
+    public long deleteByFileMd5AndUserId(String fileMd5, String userId) {
+        try {
+            DeleteByQueryRequest request = DeleteByQueryRequest.of(d -> d
+                    .index("knowledge_base")
+                    .query(q -> q.bool(b -> b
+                            .must(m -> m.term(t -> t.field("fileMd5").value(fileMd5)))
+                            .must(m -> m.term(t -> t.field("userId").value(userId)))
+                    ))
+            );
+            var response = esClient.deleteByQuery(request);
+            long deleted = response.deleted();
+            logger.info("从Elasticsearch删除用户文档: fileMd5={}, userId={}, 删除数量={}", fileMd5, userId, deleted);
+            return deleted;
+        } catch (Exception e) {
+            logger.error("从Elasticsearch删除用户文档失败: fileMd5={}, userId={}", fileMd5, userId, e);
+            throw new RuntimeException("删除用户文档失败", e);
+        }
+    }
+
     public long countByFileMd5(String fileMd5) {
         try {
             CountResponse response = esClient.count(c -> c

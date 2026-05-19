@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { UploadFileInfo } from 'naive-ui';
 import { uploadAccept } from '@/constants/common';
 
 defineOptions({
@@ -30,19 +31,51 @@ function createDefaultModel(): Api.KnowledgeBase.Form {
 const rules = ref<FormRules>({
   orgTag: defaultRequiredRule,
   isPublic: defaultRequiredRule,
-  fileList: defaultRequiredRule
+  fileList: [
+    {
+      validator: (_rule, value: UploadFileInfo[]) => Array.isArray(value) && value.some(item => item.file),
+      message: '请选择至少一个文件',
+      trigger: ['change', 'blur']
+    }
+  ]
+});
+
+const selectedFiles = computed(() => {
+  return (model.value.fileList || []).map(item => item.file).filter((file): file is File => Boolean(file));
+});
+
+const batchTotalSize = computed(() => selectedFiles.value.reduce((sum, file) => sum + file.size, 0));
+const batchSummary = computed(() => {
+  if (!selectedFiles.value.length) return '';
+  return `已选择 ${selectedFiles.value.length} 个文件，总大小 ${formatFileSize(batchTotalSize.value)}`;
+});
+
+const fileSizeLimitErrors = computed(() => {
+  if (authStore.isAdmin || !model.value.uploadMaxSizeBytes) return [];
+
+  return selectedFiles.value
+    .filter(file => file.size > model.value.uploadMaxSizeBytes!)
+    .map(file => `${file.name}（${formatFileSize(file.size)}）`);
 });
 
 const fileSizeLimitError = computed(() => {
-  if (authStore.isAdmin) return '';
-  const file = model.value.fileList?.[0]?.file;
-  if (!file || !model.value.uploadMaxSizeBytes) return '';
-  if (file.size <= model.value.uploadMaxSizeBytes) return '';
-
-  return `当前组织限制非管理员上传文件不超过 ${model.value.uploadMaxSizeMb} MB，当前文件大小为 ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+  if (!fileSizeLimitErrors.value.length) return '';
+  return `当前组织限制非管理员上传文件不超过 ${model.value.uploadMaxSizeMb} MB，以下文件超限：${fileSizeLimitErrors.value.join('、')}`;
 });
 
-const submitDisabled = computed(() => loading.value || Boolean(fileSizeLimitError.value));
+const submitDisabled = computed(
+  () => loading.value || selectedFiles.value.length === 0 || Boolean(fileSizeLimitError.value)
+);
+
+function formatFileSize(size: number) {
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(2)} KB`;
+  }
+  if (size < 1024 * 1024 * 1024) {
+    return `${(size / 1024 / 1024).toFixed(2)} MB`;
+  }
+  return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
 
 function close() {
   visible.value = false;
@@ -54,9 +87,12 @@ async function handleSubmit() {
   if (fileSizeLimitError.value) return;
 
   loading.value = true;
-  await store.enqueueUpload(model.value);
-  loading.value = false;
-  close();
+  try {
+    await store.enqueueUpload(model.value);
+    close();
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function presetSingleOrgForUser() {
@@ -102,10 +138,10 @@ function onUpdate(option: unknown) {
   <NModal
     v-model:show="visible"
     preset="dialog"
-    title="文件上传"
+    title="批量上传"
     :show-icon="false"
     :mask-closable="false"
-    class="w-500px!"
+    class="w-620px!"
     @positive-click="handleSubmit"
   >
     <NForm ref="formRef" :model="model" :rules="rules" label-placement="left" :label-width="100" mt-10>
@@ -132,17 +168,14 @@ function onUpdate(option: unknown) {
           </NSpace>
         </NRadioGroup>
       </NFormItem>
-      <NFormItem label="标签描述" path="fileList">
-        <NUpload
-          v-model:file-list="model.fileList"
-          :accept="uploadAccept"
-          :max="1"
-          :multiple="false"
-          :default-upload="false"
-        >
-          <NButton>上传文件</NButton>
+      <NFormItem label="上传文件" path="fileList">
+        <NUpload v-model:file-list="model.fileList" :accept="uploadAccept" :multiple="true" :default-upload="false">
+          <NButton>选择文件</NButton>
         </NUpload>
-        <div v-if="fileSizeLimitError" class="mt-8px text-12px text-#ef4444">
+        <div v-if="batchSummary" class="mt-8px text-12px text-#64748b">
+          {{ batchSummary }}
+        </div>
+        <div v-if="fileSizeLimitError" class="mt-8px text-12px text-#ef4444 leading-5">
           {{ fileSizeLimitError }}
         </div>
         <div v-else-if="!authStore.isAdmin && model.uploadMaxSizeMb" class="mt-8px text-12px text-#d97706">
@@ -153,7 +186,7 @@ function onUpdate(option: unknown) {
     <template #action>
       <NSpace :size="16">
         <NButton @click="close">取消</NButton>
-        <NButton type="primary" :disabled="submitDisabled" @click="handleSubmit">保存</NButton>
+        <NButton type="primary" :disabled="submitDisabled" @click="handleSubmit">开始上传</NButton>
       </NSpace>
     </template>
   </NModal>

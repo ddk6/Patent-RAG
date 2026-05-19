@@ -1,1 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M20.121 7.121c-.566-.567-1.32-.879-2.121-.879s-1.555.312-2.121.879c-.233.233-.546.362-.879.362s-.646-.129-.879-.362C12.755 5.755 10.936 5.003 9 5.003s-3.755.752-5.121 2.118C3.312 7.688 3 8.441 3 9.242s.312 1.555.879 2.121c.566.567 1.32.879 2.121.879V17c0 1.654 1.346 3 3 3s3-1.346 3-3c0 1.654 1.346 3 3 3s3-1.346 3-3v-4.166a7.2 7.2 0 0 0 2.12-1.47c.568-.567.88-1.321.88-2.122s-.312-1.554-.879-2.121m-1.414 2.828A5.2 5.2 0 0 1 16 11.386V17a1 1 0 1 1-2 0v-5.614a5.2 5.2 0 0 1-2.707-1.437A3.2 3.2 0 0 0 10 9.174V17a1 1 0 1 1-2 0V9.173a3.2 3.2 0 0 0-1.293.776a.997.997 0 0 1-1.414 0a1 1 0 0 1 0-1.414C6.314 7.514 7.657 7.003 9 7.003s2.685.511 3.707 1.532A3.24 3.24 0 0 0 15 9.483c.831 0 1.661-.316 2.293-.948a.997.997 0 0 1 1.414 0a1 1 0 0 1 0 1.414"/></svg>
+<svg width="1200" height="360" viewBox="0 0 1200 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">KnowLink logo</title>
+  <desc id="desc">A modern green vector logo for KnowLink knowledge base assistant, using a chat bubble, link motif, and clean wordmark.</desc>
+  <defs>
+    <linearGradient id="g1" x1="40" y1="40" x2="260" y2="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#10B981"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="78" y1="84" x2="222" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A7F3D0"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="340" height="340" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#065F46" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <!-- Transparent background -->
+
+  <!-- Icon -->
+  <g filter="url(#shadow)">
+    <rect x="32" y="32" width="236" height="236" rx="68" fill="#0F172A"/>
+    <path d="M88 84H180C204.301 84 224 103.699 224 128V156C224 180.301 204.301 200 180 200H151L124 228V200H88C63.6995 200 44 180.301 44 156V128C44 103.699 63.6995 84 88 84Z" fill="url(#g1)"/>
+    <path d="M102 113C91.5066 123.493 91.5066 140.507 102 151C112.493 161.493 129.507 161.493 140 151L151 140" stroke="#0F172A" stroke-width="18" stroke-linecap="round"/>
+    <path d="M166 113C176.493 102.507 193.507 102.507 204 113C214.493 123.493 214.493 140.507 204 151C193.507 161.493 176.493 161.493 166 151L155 140" stroke="#ECFDF5" stroke-width="18" stroke-linecap="round"/>
+    <circle cx="206" cy="212" r="18" fill="#A7F3D0"/>
+    <path d="M197 212H215" stroke="#065F46" stroke-width="6" stroke-linecap="round"/>
+    <path d="M206 203V221" stroke="#065F46" stroke-width="6" stroke-linecap="round"/>
+    <path d="M74 230C96 216 121 209 149 209H168" stroke="url(#g2)" stroke-width="10" stroke-linecap="round" opacity="0.95"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g transform="translate(320 78)">
+    <text x="0" y="92" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="88" font-weight="800" fill="#0F172A" letter-spacing="-2">KnowLink</text>
+    <text x="4" y="148" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="28" font-weight="600" fill="#10B981" letter-spacing="2.2">KNOWLEDGE BASE ASSISTANT</text>
+    <rect x="2" y="170" width="410" height="8" rx="4" fill="#D1FAE5"/>
+    <rect x="2" y="170" width="168" height="8" rx="4" fill="#10B981"/>
+  </g>
+</svg>

@@ -126,7 +126,7 @@ public class MinerUApiDemo {
     /**
      * 申请上传链接
      */
-    public BatchApplyResult applyUploadUrl(Path file) throws IOException, InterruptedException {
+    public MinerUService.BatchApplyResult applyUploadUrl(Path file) throws IOException, InterruptedException {
         String body = "{" +
                 "\"files\": [{" +
                 "\"name\": \"" + file.getFileName().toString() + "\"," +
@@ -162,7 +162,7 @@ public class MinerUApiDemo {
         String batchId = root.path("data").path("batch_id").asText();
         String uploadUrl = root.path("data").path("file_urls").get(0).asText();
 
-        return new BatchApplyResult(batchId, uploadUrl);
+        return new MinerUService.BatchApplyResult(batchId, uploadUrl);
     }
 
     /**

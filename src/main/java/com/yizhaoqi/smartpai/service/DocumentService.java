@@ -2,8 +2,10 @@ package com.yizhaoqi.smartpai.service;
 
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.User;
+import com.yizhaoqi.smartpai.repository.ChunkInfoRepository;
 import com.yizhaoqi.smartpai.repository.DocumentVectorRepository;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
+import com.yizhaoqi.smartpai.repository.MinerUParseResultRepository;
 import com.yizhaoqi.smartpai.repository.UserRepository;
 import io.minio.GetObjectArgs;
 import io.minio.GetPresignedObjectUrlArgs;
@@ -52,7 +54,13 @@ public class DocumentService {
     private FileUploadRepository fileUploadRepository;
 
     @Autowired
+    private ChunkInfoRepository chunkInfoRepository;
+
+    @Autowired
     private DocumentVectorRepository documentVectorRepository;
+
+    @Autowired
+    private MinerUParseResultRepository mineruParseResultRepository;
 
     @Autowired
     private MinioClient minioClient;
@@ -96,58 +104,36 @@ public class DocumentService {
             // 获取文件信息以获取文件名
             FileUpload fileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId)
                     .orElseThrow(() -> new RuntimeException("文件不存在"));
-            
-            // 1. 删除Elasticsearch中的数据
+
+            // 1. 删除当前用户的分片上传状态和数据库记录
             try {
-                long deletedCount = elasticsearchService.deleteByFileMd5(fileMd5);
-                logger.info("成功从Elasticsearch删除文档: {}, 删除了 {} 条", fileMd5, deletedCount);
+                uploadService.deleteFileMark(fileMd5, userId);
             } catch (Exception e) {
-                logger.error("从Elasticsearch删除文档时出错: {}", fileMd5, e);
-                // 继续删除其他数据
-            }
-            
-            // 2. 删除MinIO中的文件（使用MD5作为对象路径）
-            try {
-                String objectName = "merged/" + fileUpload.getFileMd5();
-                minioClient.removeObject(
-                        RemoveObjectArgs.builder()
-                                .bucket("uploads")
-                                .object(objectName)
-                                .build()
-                );
-                logger.info("成功从MinIO删除文件: {}", objectName);
-            } catch (Exception e) {
-                logger.warn("使用MD5路径删除文件失败，尝试使用文件名路径: {}", fileMd5);
-                // 降级：尝试使用旧的文件名路径（兼容旧数据）
-                try {
-                    String oldObjectName = "merged/" + fileUpload.getFileName();
-                    minioClient.removeObject(
-                            RemoveObjectArgs.builder()
-                                    .bucket("uploads")
-                                    .object(oldObjectName)
-                                    .build()
-                    );
-                    logger.info("使用旧路径成功从MinIO删除文件: {}", oldObjectName);
-                } catch (Exception ex) {
-                    logger.error("从MinIO删除文件时出错（新旧路径都失败）: {}", fileMd5, ex);
-                    // 继续删除其他数据
-                }
+                logger.warn("删除上传分片状态失败，将继续删除其他数据: fileMd5={}, userId={}, error={}",
+                        fileMd5, userId, e.getMessage());
             }
 
-            invalidatePdfSinglePagePreviewCache(fileMd5);
-            
-            // 3. 删除DocumentVector记录
             try {
-                documentVectorRepository.deleteByFileMd5(fileMd5);
-                logger.info("成功删除文档向量记录: {}", fileMd5);
+                long deletedCount = elasticsearchService.deleteByFileMd5AndUserId(fileMd5, userId);
+                logger.info("成功从 Elasticsearch 删除当前用户文档: fileMd5={}, userId={}, deleted={}",
+                        fileMd5, userId, deletedCount);
             } catch (Exception e) {
-                logger.error("删除文档向量记录时出错: {}", fileMd5, e);
-                // 继续删除其他数据
+                logger.error("从 Elasticsearch 删除当前用户文档失败，将继续清理数据库: fileMd5={}, userId={}",
+                        fileMd5, userId, e);
             }
-            
-            // 4. 删除FileUpload记录
-            fileUploadRepository.deleteByFileMd5(fileMd5);
-            logger.info("成功删除文件上传记录: {}", fileMd5);
+
+            documentVectorRepository.deleteByFileMd5AndUserId(fileMd5, userId);
+            fileUploadRepository.deleteByFileMd5AndUserId(fileMd5, userId);
+            logger.info("已删除当前用户文件记录和向量记录: fileMd5={}, userId={}", fileMd5, userId);
+
+            // 2. 如果没有其他文件记录引用该 MD5，再删除共享残留。
+            long remainingFileCount = fileUploadRepository.countByFileMd5(fileMd5);
+            if (remainingFileCount == 0) {
+                deleteSharedDocumentResources(fileMd5, fileUpload.getFileName());
+            } else {
+                logger.info("仍有其他文件记录引用该 MD5，保留共享资源: fileMd5={}, remainingFileCount={}",
+                        fileMd5, remainingFileCount);
+            }
             
             logger.info("文档删除完成: {}", fileMd5);
         } catch (Exception e) {
@@ -446,6 +432,76 @@ public class DocumentService {
         } catch (Exception e) {
             logger.error("生成 PDF 单页预览失败: fileMd5={}, pageNumber={}", fileMd5, pageNumber, e);
             throw new RuntimeException("生成 PDF 单页预览失败: " + e.getMessage(), e);
+        }
+    }
+
+    private void deleteSharedDocumentResources(String fileMd5, String fileName) {
+        try {
+            long deletedCount = elasticsearchService.deleteByFileMd5(fileMd5);
+            logger.info("成功从 Elasticsearch 删除文档: fileMd5={}, deleted={}", fileMd5, deletedCount);
+        } catch (Exception e) {
+            logger.error("从 Elasticsearch 删除文档时出错: fileMd5={}", fileMd5, e);
+        }
+
+        deleteMinioObject("merged/" + fileMd5);
+        if (fileName != null && !fileName.isBlank()) {
+            deleteMinioObject("merged/" + fileName);
+        }
+
+        chunkInfoRepository.findByFileMd5OrderByChunkIndexAsc(fileMd5)
+                .forEach(chunk -> deleteMinioObject(chunk.getStoragePath()));
+
+        try {
+            chunkInfoRepository.deleteByFileMd5(fileMd5);
+            logger.info("成功删除分片元数据: fileMd5={}", fileMd5);
+        } catch (Exception e) {
+            logger.error("删除分片元数据失败: fileMd5={}", fileMd5, e);
+        }
+
+        try {
+            documentVectorRepository.deleteByFileMd5(fileMd5);
+            logger.info("成功删除文档向量记录: fileMd5={}", fileMd5);
+        } catch (Exception e) {
+            logger.error("删除文档向量记录失败: fileMd5={}", fileMd5, e);
+        }
+
+        try {
+            mineruParseResultRepository.deleteByFileMd5(fileMd5);
+            logger.info("成功删除 MinerU 解析结果: fileMd5={}", fileMd5);
+        } catch (Exception e) {
+            logger.error("删除 MinerU 解析结果失败: fileMd5={}", fileMd5, e);
+        }
+
+        invalidatePdfSinglePagePreviewCache(fileMd5);
+    }
+
+    private void deleteMinioObject(String objectName) {
+        if (objectName == null || objectName.isBlank()) {
+            return;
+        }
+        try {
+            minioClient.removeObject(
+                    RemoveObjectArgs.builder()
+                            .bucket("uploads")
+                            .object(objectName)
+                            .build()
+            );
+            logger.info("成功从 MinIO 删除对象: {}", objectName);
+        } catch (Exception e) {
+            logger.warn("从 MinIO 删除对象失败，继续清理其他资源: objectName={}, error={}", objectName, e.getMessage());
+        }
+    }
+
+    public int getPdfPageCount(String fileMd5) {
+        FileUpload fileUpload = fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5)
+                .orElseThrow(() -> new RuntimeException("文件不存在: " + fileMd5));
+
+        try (InputStream inputStream = openFileStream(fileUpload);
+             PDDocument sourceDocument = PDDocument.load(inputStream)) {
+            return sourceDocument.getNumberOfPages();
+        } catch (Exception e) {
+            logger.error("获取 PDF 页数失败: fileMd5={}", fileMd5, e);
+            throw new RuntimeException("获取 PDF 页数失败: " + e.getMessage(), e);
         }
     }
     

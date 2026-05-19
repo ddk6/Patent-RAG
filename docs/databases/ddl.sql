@@ -62,8 +62,27 @@ CREATE TABLE document_vectors (
                                   model_version VARCHAR(32) COMMENT '向量模型版本',
                                   user_id VARCHAR(64) NOT NULL COMMENT '上传用户ID',
                                   org_tag VARCHAR(50) COMMENT '文件所属组织标签',
-                                  is_public BOOLEAN NOT NULL DEFAULT FALSE COMMENT '文件是否公开'
+                                  is_public BOOLEAN NOT NULL DEFAULT FALSE COMMENT '文件是否公开',
+                                  section_path VARCHAR(500) COMMENT '层级路径',
+                                  chunk_type VARCHAR(50) COMMENT '分块类型',
+                                  is_key_clause BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否关键条款',
+                                  token_count INT COMMENT 'token 数',
+                                  UNIQUE KEY uk_document_vector_file_user_chunk (file_md5, user_id, chunk_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文档向量存储表';
+
+CREATE TABLE mineru_parse_result (
+                                     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+                                     file_md5 VARCHAR(32) NOT NULL COMMENT '文件 MD5',
+                                     full_md LONGTEXT COMMENT '完整 Markdown 内容',
+                                     content_json LONGTEXT COMMENT 'content_list_v2.json 内容',
+                                     layout_json LONGTEXT COMMENT 'layout.json 内容',
+                                     mineru_batch_id VARCHAR(64) COMMENT 'MinerU batch_id',
+                                     parse_status VARCHAR(20) COMMENT '解析状态',
+                                     parse_error TEXT COMMENT '错误信息',
+                                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                                     UNIQUE KEY uk_mineru_parse_result_file_md5 (file_md5),
+                                     INDEX idx_file_md5 (file_md5)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='MinerU 解析结果表';
 
 CREATE TABLE rate_limit_configs (
                                     config_key VARCHAR(64) PRIMARY KEY COMMENT '限流配置键',

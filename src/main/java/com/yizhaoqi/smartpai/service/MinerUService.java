@@ -472,7 +472,7 @@ public class MinerUService {
         int chunkId = 0;
         StringBuilder currentSectionContent = new StringBuilder();
         String currentSectionPath = "";
-        int currentPage = 1;
+        int currentSectionPage = 1;
         boolean isKeyClause = false;
 
         // V2 顶层是页面数组
@@ -487,8 +487,20 @@ public class MinerUService {
         for (int pageIdx = 0; pageIdx < contentList.size(); pageIdx++) {
             JsonNode pageBlocks = contentList.get(pageIdx);
             if (!pageBlocks.isArray()) continue;
+            int pageNum = pageIdx + 1;
 
             log.debug("[MinerU] V2 解析第 {} 页，共 {} 个块", pageIdx, pageBlocks.size());
+
+            if (currentSectionContent.length() > 0 && currentSectionPage != pageNum) {
+                chunkId = flushSectionContent(
+                        chunks,
+                        currentSectionContent,
+                        currentSectionPath,
+                        isKeyClause,
+                        chunkId,
+                        currentSectionPage
+                );
+            }
 
             // 遍历当前页的每个块
             for (JsonNode block : pageBlocks) {
@@ -502,29 +514,19 @@ public class MinerUService {
                     continue;
                 }
 
-                // 计算页码 (pageIdx 从 0 开始，转为 1 开始)
-                // 注意：block 内的 page_idx 是块在页面内的索引，不是 PDF 页码
-                // PDF 真实页码应该用 pageIdx（数组索引）+ 1
-                int pageNum = pageIdx + 1;
-
                 // 根据 type 处理
                 switch (type) {
                     case "title", "paragraph" -> {
                         // 保存上一个 section
                         if (currentSectionContent.length() > 0) {
-                            List<TextChunk> sectionChunks = splitSectionText(
-                                    currentSectionContent.toString(),
+                            chunkId = flushSectionContent(
+                                    chunks,
+                                    currentSectionContent,
                                     currentSectionPath,
-                                    isKeyClause ? MAX_TOKEN_KEY_CLAUSE : MAX_TOKEN_NORMAL,
+                                    isKeyClause,
                                     chunkId,
-                                    currentPage
+                                    currentSectionPage
                             );
-                            chunks.addAll(sectionChunks);
-                            chunkId = sectionChunks.isEmpty() ? chunkId : sectionChunks.get(sectionChunks.size() - 1).getChunkId() + 1;
-                            if (!sectionChunks.isEmpty()) {
-                                currentPage = sectionChunks.get(sectionChunks.size() - 1).getPageNumber() + 1;
-                            }
-                            currentSectionContent = new StringBuilder();
                         }
 
                         // 处理新标题
@@ -536,6 +538,9 @@ public class MinerUService {
 
                         // paragraph 添加到当前 section
                         if ("paragraph".equals(type)) {
+                            if (currentSectionContent.length() == 0) {
+                                currentSectionPage = pageNum;
+                            }
                             if (currentSectionContent.length() > 0) {
                                 currentSectionContent.append("\n\n");
                             }
@@ -545,19 +550,14 @@ public class MinerUService {
                     case "table" -> {
                         // 保存当前 section
                         if (currentSectionContent.length() > 0) {
-                            List<TextChunk> sectionChunks = splitSectionText(
-                                    currentSectionContent.toString(),
+                            chunkId = flushSectionContent(
+                                    chunks,
+                                    currentSectionContent,
                                     currentSectionPath,
-                                    isKeyClause ? MAX_TOKEN_KEY_CLAUSE : MAX_TOKEN_NORMAL,
+                                    isKeyClause,
                                     chunkId,
-                                    currentPage
+                                    currentSectionPage
                             );
-                            chunks.addAll(sectionChunks);
-                            chunkId = sectionChunks.isEmpty() ? chunkId : sectionChunks.get(sectionChunks.size() - 1).getChunkId() + 1;
-                            if (!sectionChunks.isEmpty()) {
-                                currentPage = sectionChunks.get(sectionChunks.size() - 1).getPageNumber() + 1;
-                            }
-                            currentSectionContent = new StringBuilder();
                         }
 
                         // 处理表格
@@ -570,19 +570,14 @@ public class MinerUService {
                     case "list" -> {
                         // 保存当前 section
                         if (currentSectionContent.length() > 0) {
-                            List<TextChunk> sectionChunks = splitSectionText(
-                                    currentSectionContent.toString(),
+                            chunkId = flushSectionContent(
+                                    chunks,
+                                    currentSectionContent,
                                     currentSectionPath,
-                                    isKeyClause ? MAX_TOKEN_KEY_CLAUSE : MAX_TOKEN_NORMAL,
+                                    isKeyClause,
                                     chunkId,
-                                    currentPage
+                                    currentSectionPage
                             );
-                            chunks.addAll(sectionChunks);
-                            chunkId = sectionChunks.isEmpty() ? chunkId : sectionChunks.get(sectionChunks.size() - 1).getChunkId() + 1;
-                            if (!sectionChunks.isEmpty()) {
-                                currentPage = sectionChunks.get(sectionChunks.size() - 1).getPageNumber() + 1;
-                            }
-                            currentSectionContent = new StringBuilder();
                         }
 
                         // 处理列表
@@ -594,6 +589,9 @@ public class MinerUService {
                     }
                     default -> {
                         // 其他类型（如 equation_interline, code 等），添加到当前 section
+                        if (currentSectionContent.length() == 0) {
+                            currentSectionPage = pageNum;
+                        }
                         if (currentSectionContent.length() > 0) {
                             currentSectionContent.append("\n\n");
                         }
@@ -605,14 +603,14 @@ public class MinerUService {
 
         // 处理最后一个 section
         if (currentSectionContent.length() > 0) {
-            List<TextChunk> sectionChunks = splitSectionText(
-                    currentSectionContent.toString(),
+            flushSectionContent(
+                    chunks,
+                    currentSectionContent,
                     currentSectionPath,
-                    isKeyClause ? MAX_TOKEN_KEY_CLAUSE : MAX_TOKEN_NORMAL,
+                    isKeyClause,
                     chunkId,
-                    currentPage
+                    currentSectionPage
             );
-            chunks.addAll(sectionChunks);
         }
 
         // 串联 prev/next
@@ -620,6 +618,30 @@ public class MinerUService {
 
         log.info("[MinerU] V3 切分完成，共 {} 个 chunks", chunks.size());
         return chunks;
+    }
+
+    private int flushSectionContent(List<TextChunk> chunks,
+                                    StringBuilder currentSectionContent,
+                                    String currentSectionPath,
+                                    boolean isKeyClause,
+                                    int chunkId,
+                                    int pageNum) {
+        if (currentSectionContent.length() == 0) {
+            return chunkId;
+        }
+
+        List<TextChunk> sectionChunks = splitSectionText(
+                currentSectionContent.toString(),
+                currentSectionPath,
+                isKeyClause ? MAX_TOKEN_KEY_CLAUSE : MAX_TOKEN_NORMAL,
+                chunkId,
+                pageNum
+        );
+        chunks.addAll(sectionChunks);
+        currentSectionContent.setLength(0);
+        return sectionChunks.isEmpty()
+                ? chunkId
+                : sectionChunks.get(sectionChunks.size() - 1).getChunkId() + 1;
     }
 
     /**
@@ -780,7 +802,6 @@ public class MinerUService {
 
             List<String> currentRows = new ArrayList<>();
             int currentTokens = headerTokens;
-            int page = startPage;
             int chunkId = startChunkId;
 
             for (String row : dataRows) {
@@ -788,9 +809,8 @@ public class MinerUService {
                 if (currentTokens + rowTokens > MAX_TOKEN_TABLE && !currentRows.isEmpty()) {
                     String chunkText = header + "\n" + String.join("\n", currentRows);
                     int chunkTokens = estimateTokens(chunkText);
-                    TextChunk chunk = new TextChunk(chunkId++, chunkText, page, sectionPath, "table", false, chunkTokens);
+                    TextChunk chunk = new TextChunk(chunkId++, chunkText, startPage, sectionPath, "table", false, chunkTokens);
                     chunks.add(chunk);
-                    page++;
                     currentRows.clear();
                     currentTokens = headerTokens;
                 }
@@ -801,7 +821,7 @@ public class MinerUService {
             if (!currentRows.isEmpty()) {
                 String chunkText = header + "\n" + String.join("\n", currentRows);
                 int chunkTokens = estimateTokens(chunkText);
-                TextChunk chunk = new TextChunk(chunkId, chunkText, page, sectionPath, "table", false, chunkTokens);
+                TextChunk chunk = new TextChunk(chunkId, chunkText, startPage, sectionPath, "table", false, chunkTokens);
                 chunks.add(chunk);
             }
 
@@ -945,7 +965,6 @@ public class MinerUService {
 
         // 大列表按项目拆分，每个 chunk 必须保留前导句
         int chunkId = startChunkId;
-        int page = startPage;
         List<String> currentItems = new ArrayList<>();
         int currentTokens = leadTokens; // 从前导句的 token 数开始
 
@@ -960,9 +979,8 @@ public class MinerUService {
                 // 保存当前 chunk，包含前导句
                 String chunkText = buildListChunkText(lead, currentItems);
                 int chunkTokens = leadTokens + currentItems.stream().mapToInt(this::estimateTokens).sum();
-                TextChunk chunk = new TextChunk(chunkId++, chunkText, page, sectionPath, "list", false, chunkTokens);
+                TextChunk chunk = new TextChunk(chunkId++, chunkText, startPage, sectionPath, "list", false, chunkTokens);
                 chunks.add(chunk);
-                page++;
                 currentItems.clear();
                 currentTokens = leadTokens; // 重置时也要包含前导句 token
             }
@@ -975,7 +993,7 @@ public class MinerUService {
         if (!currentItems.isEmpty()) {
             String chunkText = buildListChunkText(lead, currentItems);
             int chunkTokens = leadTokens + currentItems.stream().mapToInt(this::estimateTokens).sum();
-            TextChunk chunk = new TextChunk(chunkId, chunkText, page, sectionPath, "list", false, chunkTokens);
+            TextChunk chunk = new TextChunk(chunkId, chunkText, startPage, sectionPath, "list", false, chunkTokens);
             chunks.add(chunk);
         }
 
@@ -1033,7 +1051,6 @@ public class MinerUService {
             List<String> dataRows = rows.subList(headerRowCount, rows.size());
             List<String> currentRows = new ArrayList<>();
             int currentTokens = headerTokens;
-            int page = startPage;
             int chunkId = startChunkId;
 
             for (String row : dataRows) {
@@ -1041,9 +1058,8 @@ public class MinerUService {
                 if (currentTokens + rowTokens > MAX_TOKEN_TABLE && !currentRows.isEmpty()) {
                     // 保存当前 chunk，包含表头
                     String chunkText = headerText + "\n" + String.join("\n", currentRows);
-                    TextChunk chunk = new TextChunk(chunkId++, chunkText, page, sectionPath, "table", false, currentTokens);
+                    TextChunk chunk = new TextChunk(chunkId++, chunkText, startPage, sectionPath, "table", false, currentTokens);
                     chunks.add(chunk);
-                    page++;
                     currentRows.clear();
                     currentTokens = headerTokens;
                 }
@@ -1054,7 +1070,7 @@ public class MinerUService {
             // 保存最后一个 chunk
             if (!currentRows.isEmpty()) {
                 String chunkText = headerText + "\n" + String.join("\n", currentRows);
-                TextChunk chunk = new TextChunk(chunkId, chunkText, page, sectionPath, "table", false, currentTokens);
+                TextChunk chunk = new TextChunk(chunkId, chunkText, startPage, sectionPath, "table", false, currentTokens);
                 chunks.add(chunk);
             }
 
@@ -1121,7 +1137,6 @@ public class MinerUService {
 
         // 大列表：前导句 + 部分列表项，过长则拆分但保留前导句
         int chunkId = startChunkId;
-        int page = startPage;
         List<String> currentItems = new ArrayList<>();
         int currentTokens = estimateTokens(lead);
         boolean leadAdded = false;
@@ -1133,9 +1148,8 @@ public class MinerUService {
             if (currentTokens + itemTokens > MAX_TOKEN_NORMAL && !currentItems.isEmpty()) {
                 // 保存当前 chunk
                 String chunkText = buildListChunkText(lead, currentItems);
-                TextChunk chunk = new TextChunk(chunkId++, chunkText, page, sectionPath, "list", false, currentTokens);
+                TextChunk chunk = new TextChunk(chunkId++, chunkText, startPage, sectionPath, "list", false, currentTokens);
                 chunks.add(chunk);
-                page++;
                 currentItems.clear();
                 currentTokens = estimateTokens(lead);
                 leadAdded = false;
@@ -1148,7 +1162,7 @@ public class MinerUService {
         // 保存最后一个 chunk
         if (!currentItems.isEmpty()) {
             String chunkText = buildListChunkText(lead, currentItems);
-            TextChunk chunk = new TextChunk(chunkId, chunkText, page, sectionPath, "list", false, currentTokens);
+            TextChunk chunk = new TextChunk(chunkId, chunkText, startPage, sectionPath, "list", false, currentTokens);
             chunks.add(chunk);
         }
 
@@ -1193,16 +1207,14 @@ public class MinerUService {
         if (parts.length > 1) {
             // 有子标题，递归处理每个子部分
             int chunkId = startChunkId;
-            int page = startPage;
             for (String part : parts) {
                 part = part.trim();
                 if (part.isEmpty()) continue;
 
-                List<TextChunk> subChunks = splitSectionText(part, sectionPath, maxTokens, chunkId, page);
+                List<TextChunk> subChunks = splitSectionText(part, sectionPath, maxTokens, chunkId, startPage);
                 chunks.addAll(subChunks);
                 if (!subChunks.isEmpty()) {
                     chunkId = subChunks.get(subChunks.size() - 1).getChunkId() + 1;
-                    page = subChunks.get(subChunks.size() - 1).getPageNumber() + 1;
                 }
             }
             return chunks;
@@ -1224,7 +1236,6 @@ public class MinerUService {
         StringBuilder currentChunk = new StringBuilder();
         int currentTokens = 0;
         int chunkId = startChunkId;
-        int page = startPage;
 
         for (String sentence : sentences) {
             sentence = sentence.trim();
@@ -1235,26 +1246,23 @@ public class MinerUService {
             // 如果单个句子就超过限制，按词切
             if (sentenceTokens > maxTokens) {
                 if (currentChunk.length() > 0) {
-                    chunks.add(new TextChunk(chunkId++, currentChunk.toString().trim(), page, sectionPath, "text", isKeyClauseText(currentChunk.toString()), currentTokens));
+                    chunks.add(new TextChunk(chunkId++, currentChunk.toString().trim(), startPage, sectionPath, "text", isKeyClauseText(currentChunk.toString()), currentTokens));
                     currentChunk = new StringBuilder();
                     currentTokens = 0;
-                    page++;
                 }
                 // 按词分割超长句子
-                chunks.addAll(splitLongSentence(sentence, sectionPath, maxTokens, chunkId, page));
+                chunks.addAll(splitLongSentence(sentence, sectionPath, maxTokens, chunkId, startPage));
                 if (!chunks.isEmpty()) {
                     chunkId = chunks.get(chunks.size() - 1).getChunkId() + 1;
-                    page = chunks.get(chunks.size() - 1).getPageNumber() + 1;
                 }
                 continue;
             }
 
             // 如果添加这个句子会超过限制
             if (currentTokens + sentenceTokens > maxTokens && currentChunk.length() > 0) {
-                chunks.add(new TextChunk(chunkId++, currentChunk.toString().trim(), page, sectionPath, "text", isKeyClauseText(currentChunk.toString()), currentTokens));
+                chunks.add(new TextChunk(chunkId++, currentChunk.toString().trim(), startPage, sectionPath, "text", isKeyClauseText(currentChunk.toString()), currentTokens));
                 currentChunk = new StringBuilder();
                 currentTokens = 0;
-                page++;
             }
 
             if (currentChunk.length() > 0) {
@@ -1266,7 +1274,7 @@ public class MinerUService {
 
         // 保存最后一个 chunk
         if (currentChunk.length() > 0) {
-            chunks.add(new TextChunk(chunkId, currentChunk.toString().trim(), page, sectionPath, "text", isKeyClauseText(currentChunk.toString()), currentTokens));
+            chunks.add(new TextChunk(chunkId, currentChunk.toString().trim(), startPage, sectionPath, "text", isKeyClauseText(currentChunk.toString()), currentTokens));
         }
 
         return chunks;
@@ -1283,7 +1291,6 @@ public class MinerUService {
         StringBuilder currentChunk = new StringBuilder();
         int currentTokens = 0;
         int chunkId = startChunkId;
-        int page = startPage;
 
         for (String part : parts) {
             part = part.trim();
@@ -1292,10 +1299,9 @@ public class MinerUService {
             int partTokens = estimateTokens(part);
 
             if (currentTokens + partTokens > maxTokens && currentChunk.length() > 0) {
-                chunks.add(new TextChunk(chunkId++, currentChunk.toString().trim(), page, sectionPath, "text", false, currentTokens));
+                chunks.add(new TextChunk(chunkId++, currentChunk.toString().trim(), startPage, sectionPath, "text", false, currentTokens));
                 currentChunk = new StringBuilder();
                 currentTokens = 0;
-                page++;
             }
 
             if (currentChunk.length() > 0) {
@@ -1306,7 +1312,7 @@ public class MinerUService {
         }
 
         if (currentChunk.length() > 0) {
-            chunks.add(new TextChunk(chunkId, currentChunk.toString().trim(), page, sectionPath, "text", false, currentTokens));
+            chunks.add(new TextChunk(chunkId, currentChunk.toString().trim(), startPage, sectionPath, "text", false, currentTokens));
         }
 
         return chunks;

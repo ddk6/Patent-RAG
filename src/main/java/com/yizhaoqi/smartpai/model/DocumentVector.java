@@ -11,7 +11,13 @@ import java.sql.Blob;
  */
 @Data
 @Entity
-@Table(name = "document_vectors")
+@Table(
+        name = "document_vectors",
+        uniqueConstraints = @UniqueConstraint(
+                name = "uk_document_vector_file_user_chunk",
+                columnNames = {"file_md5", "user_id", "chunk_id"}
+        )
+)
 public class DocumentVector {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

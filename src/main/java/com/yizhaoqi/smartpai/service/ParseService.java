@@ -270,7 +270,21 @@ public class ParseService {
             vector.setUserId(userId);
             vector.setOrgTag(orgTag);
             vector.setPublic(isPublic);
-            documentVectorRepository.save(vector);
+            documentVectorRepository.upsertChunk(
+                    vector.getFileMd5(),
+                    vector.getChunkId(),
+                    vector.getTextContent(),
+                    vector.getPageNumber(),
+                    vector.getAnchorText(),
+                    vector.getModelVersion(),
+                    vector.getUserId(),
+                    vector.getOrgTag(),
+                    vector.isPublic(),
+                    vector.getSectionPath(),
+                    vector.getChunkType(),
+                    vector.isKeyClause(),
+                    vector.getTokenCount()
+            );
         }
         logger.info("成功保存 {} 个子切片到数据库", chunks.size());
         return currentChunkId;

@@ -4,6 +4,11 @@
 # Log file
 *.log
 
+# Local environment files
+.env
+.env.*
+!.env.example
+
 /anotherRagProject/
 /download/
 

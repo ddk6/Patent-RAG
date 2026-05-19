@@ -26,6 +26,7 @@ import java.nio.file.Path;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
+import java.util.Optional;
 
 @Service
 @Slf4j
@@ -72,13 +73,19 @@ public class FileProcessingConsumer {
         log.info("文件权限信息: userId={}, orgTag={}, isPublic={}",
                 task.getUserId(), task.getOrgTag(), task.isPublic());
 
+        if (isAlreadyCompleted(task)) {
+            log.info("文件处理任务已完成，跳过重复 Kafka 消息: fileMd5={}, userId={}",
+                    task.getFileMd5(), task.getUserId());
+            return;
+        }
+
         // 更新解析状态为 PROCESSING  这个状态存在哪个表
         // 这个状态存在mineru_parse_result表中
         // 这个表是MinerU解析结果的存储表
         // 这个表的字段有：fileMd5, parser, status, createdAt, updatedAt
         //这个表存在哪？
         // 这个表存在数据库中
-        updateParseStatus(task.getFileMd5(), "PROCESSING", "MINERU");
+        updateParseStatus(task, "PROCESSING", "MINERU");
 
         try {
             // ========== 根据配置选择解析器 ==========
@@ -91,7 +98,7 @@ public class FileProcessingConsumer {
             }
 
             // 更新解析状态为 COMPLETED
-            updateParseStatus(task.getFileMd5(), "COMPLETED", null);
+            updateParseStatus(task, "COMPLETED", null);
 
         }
         //异常处理
@@ -107,15 +114,15 @@ public class FileProcessingConsumer {
                 log.warn("[MinerU] MinerU 解析失败，尝试降级到 Tika: {}", task.getFileMd5());
                 try {
                     processWithTika(task);
-                    updateParseStatus(task.getFileMd5(), "COMPLETED", "TIKA");
+                    updateParseStatus(task, "COMPLETED", "TIKA");
                     log.info("[MinerU] Tika 降级解析成功: {}", task.getFileMd5());
                 } catch (Exception tikaEx) {
                     log.error("[MinerU] Tika 降级解析也失败: {}", task.getFileMd5(), tikaEx);
-                    updateParseStatus(task.getFileMd5(), "FAILED", "TIKA");
+                    updateParseStatus(task, "FAILED", "TIKA");
                     throw new RuntimeException("Both MinerU and Tika parsing failed", tikaEx);
                 }
             } else {
-                updateParseStatus(task.getFileMd5(), "FAILED", null);
+                updateParseStatus(task, "FAILED", null);
                 throw new RuntimeException("Error processing task", e);
             }
         }
@@ -152,11 +159,13 @@ public class FileProcessingConsumer {
             //这个表存的是分块后的文本内容
             //这个表存在数据库中
             saveMinerUChunksToDocumentVector(task, parseResult);
+            updateParseStatus(task, "CHUNKS_SAVED", null);
 
             // 5. 向量化处理
             //这里调用向量化服务，将MinerU解析结果中的文本内容向量化
             //向量化结果是一个JSON文件，包含向量信息 和 向量使用情况
             //task就是MinerU解析结果的存储表 字段有：fileMd5, parser, status, createdAt, updatedAt、userId、orgTag、isPublic、userId等
+            updateParseStatus(task, "VECTORIZING", null);
             VectorizationService.VectorizationUsageResult vectorizationResult = vectorizationService.vectorizeWithUsage(
                     task.getFileMd5(),
                     task.getUserId(),
@@ -213,7 +222,21 @@ public class FileProcessingConsumer {
             vector.setKeyClause(minerUChunk.isKeyClause());
             vector.setTokenCount(minerUChunk.getTokenCount());
 
-            documentVectorRepository.save(vector);
+            documentVectorRepository.upsertChunk(
+                    vector.getFileMd5(),
+                    vector.getChunkId(),
+                    vector.getTextContent(),
+                    vector.getPageNumber(),
+                    vector.getAnchorText(),
+                    vector.getModelVersion(),
+                    vector.getUserId(),
+                    vector.getOrgTag(),
+                    vector.isPublic(),
+                    vector.getSectionPath(),
+                    vector.getChunkType(),
+                    vector.isKeyClause(),
+                    vector.getTokenCount()
+            );
         }
 
         log.info("[MinerU] 保存 chunks 完成: fileMd5={}, count={}",
@@ -245,6 +268,7 @@ public class FileProcessingConsumer {
             log.info("[Tika] 文件解析完成: fileMd5={}", task.getFileMd5());
 
             // 向量化处理
+            updateParseStatus(task, "VECTORIZING", null);
             VectorizationService.VectorizationUsageResult vectorizationResult = vectorizationService.vectorizeWithUsage(
                     task.getFileMd5(),
                     task.getUserId(),
@@ -274,7 +298,8 @@ public class FileProcessingConsumer {
     //为啥要保存解析结果？因为MinerU解析结果是一个JSON文件，包含解析后的文本内容、布局信息、元数据等
     //我们需要将这些信息保存到数据库中，方便后续的检索和分析
     private void saveMinerUResult(String fileMd5, MinerUService.MinerUParseResult parseResult) {
-        MinerUParseResult entity = new MinerUParseResult();
+        MinerUParseResult entity = mineruParseResultRepository.findByFileMd5(fileMd5)
+                .orElseGet(MinerUParseResult::new);
         entity.setFileMd5(fileMd5);
         entity.setFullMd(parseResult.getFullMd());
         entity.setContentJson(parseResult.getContentJson());
@@ -298,9 +323,11 @@ public class FileProcessingConsumer {
     //根据文件MD5更新解析状态和解析方法
     //如果解析状态为 COMPLETED 或 FAILED，更新解析时间
     //如果解析状态为 FAILED，更新解析错误信息
-    private void updateParseStatus(String fileMd5, String status, String parseMethod) {
+    private void updateParseStatus(FileProcessingTask task, String status, String parseMethod) {
+        String fileMd5 = task != null ? task.getFileMd5() : null;
+        String userId = task != null ? task.getUserId() : null;
         try {
-            fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5)
+            findLatestFileUpload(fileMd5, userId)
                     .ifPresent(fileUpload -> {
                         fileUpload.setParseStatus(status);
                         if (parseMethod != null) {
@@ -315,6 +342,29 @@ public class FileProcessingConsumer {
         } catch (Exception e) {
             log.warn("更新解析状态失败: fileMd5={}", fileMd5, e);
         }
+    }
+
+    private Optional<FileUpload> findLatestFileUpload(String fileMd5, String userId) {
+        if (fileMd5 == null) {
+            return Optional.empty();
+        }
+        if (userId != null) {
+            Optional<FileUpload> upload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId);
+            if (upload.isPresent()) {
+                return upload;
+            }
+        }
+        return fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5);
+    }
+
+    private boolean isAlreadyCompleted(FileProcessingTask task) {
+        if (task == null || task.getFileMd5() == null || task.getUserId() == null) {
+            return false;
+        }
+        return fileUploadRepository
+                .findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(task.getFileMd5(), task.getUserId())
+                .map(fileUpload -> "COMPLETED".equalsIgnoreCase(fileUpload.getParseStatus()))
+                .orElse(false);
     }
 
     /**

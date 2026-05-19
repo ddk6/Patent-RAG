@@ -12,9 +12,13 @@ import java.time.LocalDateTime;
  */
 @Data
 @Entity
-@Table(name = "mineru_parse_result", indexes = {
-        @Index(name = "idx_file_md5", columnList = "file_md5")
-})
+@Table(
+        name = "mineru_parse_result",
+        indexes = {
+                @Index(name = "idx_file_md5", columnList = "file_md5")
+        },
+        uniqueConstraints = @UniqueConstraint(name = "uk_mineru_parse_result_file_md5", columnNames = "file_md5")
+)
 public class MinerUParseResult {
 
     /** 自增主键 */

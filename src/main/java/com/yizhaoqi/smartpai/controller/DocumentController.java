@@ -766,11 +766,23 @@ public class DocumentController {
         }
 
         if (preferSinglePagePreview && "pdf".equals(previewType) && pageNumber != null && pageNumber > 0) {
-            payload.put("previewUrl", buildSinglePagePreviewUrl(file.getFileMd5(), pageNumber));
-            payload.put("sourceUrl", previewUrl);
-            payload.put("singlePageMode", true);
-            payload.put("sourcePageNumber", pageNumber);
-            return payload;
+            try {
+                int totalPages = documentService.getPdfPageCount(file.getFileMd5());
+                if (pageNumber <= totalPages) {
+                    payload.put("previewUrl", buildSinglePagePreviewUrl(file.getFileMd5(), pageNumber));
+                    payload.put("sourceUrl", previewUrl);
+                    payload.put("singlePageMode", true);
+                    payload.put("sourcePageNumber", pageNumber);
+                    return payload;
+                }
+                LogUtils.logBusiness("PREVIEW_FILE_BY_NAME", "system",
+                        "引用页码超出 PDF 范围，回退整本预览: fileMd5=%s, pageNumber=%s, totalPages=%s",
+                        file.getFileMd5(), pageNumber, totalPages);
+            } catch (Exception e) {
+                LogUtils.logBusinessError("PREVIEW_FILE_BY_NAME", "system",
+                        "校验 PDF 页码失败，回退整本预览: fileMd5=%s, pageNumber=%s",
+                        e, file.getFileMd5(), pageNumber);
+            }
         }
 
         payload.put("previewUrl", previewUrl);
