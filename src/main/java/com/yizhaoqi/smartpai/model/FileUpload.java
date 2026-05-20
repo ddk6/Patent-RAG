@@ -18,6 +18,8 @@ public class FileUpload {
     public static final int STATUS_UPLOADING = 0;
     public static final int STATUS_COMPLETED = 1;
     public static final int STATUS_MERGING = 2;
+    public static final String DOCUMENT_TYPE_GENERAL = "GENERAL";
+    public static final String DOCUMENT_TYPE_PATENT = "PATENT";
 
     /**
      * 文件的唯一标识符
@@ -80,6 +82,13 @@ public class FileUpload {
 
     @Column(name = "actual_chunk_count")
     private Integer actualChunkCount;
+
+    /**
+     * 文档类型
+     * GENERAL 表示通用文档 RAG，PATENT 表示专利结构化 RAG。
+     */
+    @Column(name = "document_type", length = 32, nullable = false)
+    private String documentType = DOCUMENT_TYPE_GENERAL;
 
     /**
      * 文件上传的创建时间

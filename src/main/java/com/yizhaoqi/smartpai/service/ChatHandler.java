@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yizhaoqi.smartpai.entity.LongTermMemory;
 import com.yizhaoqi.smartpai.entity.SearchResult;
 import com.yizhaoqi.smartpai.exception.RateLimitExceededException;
+import com.yizhaoqi.smartpai.service.patent.PatentSearchService;
+import com.yizhaoqi.smartpai.service.patent.dto.PatentSearchRequest;
+import com.yizhaoqi.smartpai.service.patent.dto.PatentSearchResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -24,6 +27,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.regex.Pattern;
 
 /**
  * 聊天处理服务
@@ -40,8 +44,15 @@ public class ChatHandler {
     private static final int MAX_EVIDENCE_SNIPPET_LEN = 160;
     private static final int MAX_CONVERSATION_ROUNDS = 5;  // 最多保留5轮对话（10条消息）
     private static final int MAX_MESSAGES = MAX_CONVERSATION_ROUNDS * 2;  // 10条消息
+    private static final Pattern PATENT_NUMBER_PATTERN = Pattern.compile("(CN\\s?\\d{6,}[A-Z]?|\\b\\d{10,16}\\b)", Pattern.CASE_INSENSITIVE);
+    private static final List<String> PATENT_QUERY_KEYWORDS = List.of(
+            "专利", "权利要求", "独立权利要求", "从属权利要求", "说明书", "公开号", "公布号", "公告号",
+            "申请号", "申请人", "发明人", "ipc", "保护范围", "技术方案", "技术特征", "实施例",
+            "新颖性", "创造性", "侵权", "等同", "摘要", "附图"
+    );
     private final RedisTemplate<String, String> redisTemplate;
     private final HybridSearchService searchService;
+    private final PatentSearchService patentSearchService;
     private final LlmProviderRouter llmProviderRouter;
     private final RateLimitService rateLimitService;
     private final UsageQuotaService usageQuotaService;
@@ -60,6 +71,7 @@ public class ChatHandler {
 
     public ChatHandler(RedisTemplate<String, String> redisTemplate,
                       HybridSearchService searchService,
+                      PatentSearchService patentSearchService,
                       LlmProviderRouter llmProviderRouter,
                       RateLimitService rateLimitService,
                       UsageQuotaService usageQuotaService,
@@ -67,6 +79,7 @@ public class ChatHandler {
                       @Qualifier("chatMonitorExecutor") ThreadPoolTaskExecutor chatMonitorExecutor) {
         this.redisTemplate = redisTemplate;
         this.searchService = searchService;
+        this.patentSearchService = patentSearchService;
         this.llmProviderRouter = llmProviderRouter;
         this.rateLimitService = rateLimitService;
         this.usageQuotaService = usageQuotaService;
@@ -101,8 +114,8 @@ public class ChatHandler {
             String longTermMemoryContext = buildLongTermMemoryContext(longTermMemories);
             logger.debug("检索到 {} 条长期记忆", longTermMemories.size());
 
-            // 3. 执行带权限过滤的混合搜索
-            List<SearchResult> searchResults = searchService.searchWithPermission(userMessage, userId, 5);
+            // 3. 执行带权限过滤的检索。专利问题优先走专利结构化索引，普通问题保留原通用 RAG。
+            List<SearchResult> searchResults = retrieveRagContext(userMessage, userId);
             logger.debug("搜索结果数量: {}", searchResults.size());
             
             // 4. 构建上下文
@@ -418,6 +431,117 @@ public class ChatHandler {
         return serialized;
     }
 
+    private List<SearchResult> retrieveRagContext(String userMessage, String userId) {
+        if (!isPatentQuery(userMessage)) {
+            return searchService.searchWithPermission(userMessage, userId, 5);
+        }
+
+        try {
+            PatentSearchRequest request = new PatentSearchRequest();
+            request.setQuery(userMessage);
+            request.setTopK(5);
+            List<PatentSearchResult> patentResults = patentSearchService.search(request, userId);
+            if (patentResults != null && !patentResults.isEmpty()) {
+                logger.info("[ChatRAG] 命中专利检索链路: userId={}, count={}", userId, patentResults.size());
+                return patentResults.stream()
+                        .map(this::toSearchResult)
+                        .toList();
+            }
+            logger.info("[ChatRAG] 专利检索无结果，不回退通用检索: userId={}", userId);
+            return List.of();
+        } catch (Exception e) {
+            logger.warn("[ChatRAG] 专利检索失败，回退通用检索: userId={}, error={}", userId, e.getMessage(), e);
+        }
+
+        return searchService.searchWithPermission(userMessage, userId, 5);
+    }
+
+    private boolean isPatentQuery(String userMessage) {
+        if (userMessage == null || userMessage.isBlank()) {
+            return false;
+        }
+        String normalized = userMessage.toLowerCase();
+        if (PATENT_NUMBER_PATTERN.matcher(normalized).find()) {
+            return true;
+        }
+        return PATENT_QUERY_KEYWORDS.stream().anyMatch(normalized::contains);
+    }
+
+    private SearchResult toSearchResult(PatentSearchResult patentResult) {
+        String contextText = buildPatentContextText(patentResult);
+        String matchedText = patentResult.getTextContent() != null ? patentResult.getTextContent() : contextText;
+        return new SearchResult(
+                patentResult.getFileMd5(),
+                patentResult.getChunkNo(),
+                contextText,
+                patentResult.getScore(),
+                null,
+                null,
+                false,
+                buildPatentFileLabel(patentResult),
+                patentResult.getPageNumber(),
+                patentResult.getAnchorText(),
+                "PATENT_" + safeRetrievalMode(patentResult.getRetrievalMode()),
+                matchedText
+        );
+    }
+
+    private String buildPatentContextText(PatentSearchResult result) {
+        StringBuilder builder = new StringBuilder("【专利检索】");
+        appendPatentField(builder, "题名", result.getTitle());
+        appendPatentField(builder, "公开号", result.getPublicationNo());
+        appendPatentField(builder, "申请号", result.getApplicationNo());
+        appendPatentField(builder, "申请人", result.getApplicant());
+        appendPatentField(builder, "专利类型", result.getPatentType());
+        appendPatentField(builder, "来源", describePatentSource(result));
+        if (result.getTextContent() != null && !result.getTextContent().isBlank()) {
+            builder.append(" 内容: ").append(result.getTextContent().trim());
+        }
+        return builder.toString();
+    }
+
+    private void appendPatentField(StringBuilder builder, String label, String value) {
+        if (value != null && !value.isBlank()) {
+            builder.append(" ").append(label).append(": ").append(value.trim()).append(";");
+        }
+    }
+
+    private String describePatentSource(PatentSearchResult result) {
+        String sourceType = result.getSourceType();
+        if ("CLAIM".equalsIgnoreCase(sourceType) && result.getClaimNo() != null) {
+            return (result.isIndependentClaim() ? "独立权利要求" : "权利要求") + result.getClaimNo();
+        }
+        if ("ABSTRACT".equalsIgnoreCase(sourceType)) {
+            return "摘要";
+        }
+        if ("BIBLIOGRAPHIC".equalsIgnoreCase(sourceType)) {
+            return "著录项";
+        }
+        if ("DESCRIPTION".equalsIgnoreCase(sourceType)) {
+            return result.getSectionPath() != null && !result.getSectionPath().isBlank()
+                    ? "说明书-" + result.getSectionPath()
+                    : "说明书";
+        }
+        return sourceType != null ? sourceType : "专利片段";
+    }
+
+    private String buildPatentFileLabel(PatentSearchResult result) {
+        if (result.getPublicationNo() != null && !result.getPublicationNo().isBlank()) {
+            return result.getPublicationNo();
+        }
+        if (result.getApplicationNo() != null && !result.getApplicationNo().isBlank()) {
+            return result.getApplicationNo();
+        }
+        if (result.getTitle() != null && !result.getTitle().isBlank()) {
+            return result.getTitle();
+        }
+        return "patent";
+    }
+
+    private String safeRetrievalMode(String retrievalMode) {
+        return retrievalMode != null && !retrievalMode.isBlank() ? retrievalMode : "HYBRID";
+    }
+
     private String buildContext(List<SearchResult> searchResults, String sessionId, String userMessage) {
         if (searchResults == null || searchResults.isEmpty()) {
             // 返回空字符串，让 LLM provider 按"无检索结果"逻辑处理
@@ -660,6 +784,9 @@ public class ChatHandler {
     }
 
     private String buildRetrievalLabel(String retrievalMode) {
+        if (retrievalMode != null && retrievalMode.toUpperCase().startsWith("PATENT_")) {
+            return "专利结构化检索";
+        }
         if ("TEXT_ONLY".equalsIgnoreCase(retrievalMode)) {
             return "关键词召回";
         }

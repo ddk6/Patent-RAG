@@ -4,6 +4,7 @@ import com.yizhaoqi.smartpai.config.KafkaConfig;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.OrganizationTag;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
+import com.yizhaoqi.smartpai.service.DocumentTypeResolver;
 import com.yizhaoqi.smartpai.service.FileTypeValidationService;
 import com.yizhaoqi.smartpai.service.ParseService;
 import com.yizhaoqi.smartpai.service.UploadService;
@@ -59,6 +60,7 @@ class UploadControllerTest {
         ReflectionTestUtils.setField(uploadController, "fileUploadRepository", fileUploadRepository);
         ReflectionTestUtils.setField(uploadController, "fileTypeValidationService", fileTypeValidationService);
         ReflectionTestUtils.setField(uploadController, "parseService", parseService);
+        ReflectionTestUtils.setField(uploadController, "documentTypeResolver", new DocumentTypeResolver());
         when(fileTypeValidationService.getSupportedFileTypes()).thenReturn(Set.of("pdf"));
     }
 
@@ -82,6 +84,7 @@ class UploadControllerTest {
                 1,
                 "TEAM_A",
                 false,
+                null,
                 file,
                 "1"
         );
@@ -110,12 +113,13 @@ class UploadControllerTest {
                 1,
                 "TEAM_A",
                 false,
+                null,
                 file,
                 "1"
         );
 
         assertEquals(200, response.getStatusCode().value());
-        assertEquals(Map.of("uploaded", List.of(0), "progress", 100.0d), response.getBody().get("data"));
+        assertEquals(Map.of("uploaded", List.of(0), "progress", 100.0d, "documentType", "GENERAL"), response.getBody().get("data"));
         verify(uploadService).uploadChunk("md5", 0, 20L * 1024 * 1024, "test.pdf", file, "TEAM_A", false, "1");
         verify(userService, never()).getOrganizationTag(anyString());
     }
@@ -138,6 +142,7 @@ class UploadControllerTest {
                 2,
                 "TEAM_A",
                 false,
+                null,
                 file,
                 "1"
         );

@@ -36,12 +36,18 @@ CREATE TABLE file_upload (
                              estimated_chunk_count INT DEFAULT NULL COMMENT '预估切片数',
                              actual_embedding_tokens BIGINT DEFAULT NULL COMMENT '实际 embedding token 数',
                              actual_chunk_count INT DEFAULT NULL COMMENT '实际切片数',
+                             document_type VARCHAR(32) NOT NULL DEFAULT 'GENERAL' COMMENT '文档类型：GENERAL通用文档 PATENT专利文档',
+                             parse_method VARCHAR(20) DEFAULT NULL COMMENT '解析方法：TIKA/MINERU/PATENT',
+                             parse_status VARCHAR(20) DEFAULT NULL COMMENT '解析状态：PENDING/PROCESSING/COMPLETED/FAILED',
+                             parsed_at TIMESTAMP NULL DEFAULT NULL COMMENT '解析完成时间',
                              created_at   TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                              merged_at    TIMESTAMP        NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '合并时间',
                              PRIMARY KEY (id),
                              UNIQUE KEY uk_md5_user (file_md5, user_id),
                              INDEX idx_user (user_id),
-                             INDEX idx_org_tag (org_tag)
+                             INDEX idx_org_tag (org_tag),
+                             INDEX idx_document_type (document_type),
+                             INDEX idx_parse_status (parse_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件上传记录';
 CREATE TABLE chunk_info (
                             id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '分块记录唯一标识',
@@ -83,6 +89,107 @@ CREATE TABLE mineru_parse_result (
                                      UNIQUE KEY uk_mineru_parse_result_file_md5 (file_md5),
                                      INDEX idx_file_md5 (file_md5)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='MinerU 解析结果表';
+
+CREATE TABLE patent_documents (
+                                  id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '专利结构化文档主键',
+                                  upload_id BIGINT NOT NULL COMMENT '关联 file_upload.id',
+                                  file_md5 VARCHAR(32) NOT NULL COMMENT '文件 MD5',
+                                  file_name VARCHAR(255) NOT NULL COMMENT '文件名称',
+                                  user_id VARCHAR(64) NOT NULL COMMENT '上传用户 ID',
+                                  org_tag VARCHAR(50) DEFAULT NULL COMMENT '组织标签',
+                                  is_public BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否公开',
+                                  patent_type VARCHAR(50) DEFAULT NULL COMMENT '专利类型：发明/实用新型/外观设计等',
+                                  publication_no VARCHAR(64) DEFAULT NULL COMMENT '公开号/公告号',
+                                  application_no VARCHAR(64) DEFAULT NULL COMMENT '申请号',
+                                  title VARCHAR(512) DEFAULT NULL COMMENT '专利名称',
+                                  applicant VARCHAR(1024) DEFAULT NULL COMMENT '申请人',
+                                  inventor VARCHAR(1024) DEFAULT NULL COMMENT '发明人/设计人',
+                                  application_date DATE DEFAULT NULL COMMENT '申请日',
+                                  publication_date DATE DEFAULT NULL COMMENT '公开/公告日',
+                                  ipc_classification VARCHAR(512) DEFAULT NULL COMMENT 'IPC 分类号',
+                                  agency VARCHAR(512) DEFAULT NULL COMMENT '专利代理机构',
+                                  agent VARCHAR(512) DEFAULT NULL COMMENT '代理人',
+                                  address VARCHAR(1024) DEFAULT NULL COMMENT '申请人地址',
+                                  abstract_text LONGTEXT COMMENT '摘要',
+                                  main_claim_text LONGTEXT COMMENT '主权利要求文本',
+                                  raw_bibliographic_json JSON COMMENT '首页著录项原始结构化 JSON',
+                                  parser_version VARCHAR(32) DEFAULT NULL COMMENT '专利解析器版本',
+                                  parse_status VARCHAR(20) NOT NULL DEFAULT 'PENDING' COMMENT '解析状态：PENDING/PROCESSING/COMPLETED/FAILED',
+                                  parse_error TEXT COMMENT '解析错误信息',
+                                  parsed_at TIMESTAMP NULL DEFAULT NULL COMMENT '解析完成时间',
+                                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                                  UNIQUE KEY uk_patent_documents_upload (upload_id),
+                                  INDEX idx_patent_documents_file_md5 (file_md5),
+                                  INDEX idx_patent_documents_user (user_id),
+                                  INDEX idx_patent_documents_org_tag (org_tag),
+                                  INDEX idx_patent_documents_publication_no (publication_no),
+                                  INDEX idx_patent_documents_application_no (application_no),
+                                  INDEX idx_patent_documents_title (title),
+                                  INDEX idx_patent_documents_applicant (applicant(255)),
+                                  CONSTRAINT fk_patent_documents_upload FOREIGN KEY (upload_id) REFERENCES file_upload(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='专利结构化文档表';
+
+CREATE TABLE patent_sections (
+                                 id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '专利章节主键',
+                                 patent_id BIGINT NOT NULL COMMENT '关联 patent_documents.id',
+                                 section_type VARCHAR(50) NOT NULL COMMENT '章节类型：ABSTRACT/CLAIMS/TECHNICAL_FIELD/BACKGROUND/SUMMARY/DRAWING_DESC/EMBODIMENT等',
+                                 section_title VARCHAR(255) DEFAULT NULL COMMENT '章节标题',
+                                 section_order INT NOT NULL DEFAULT 0 COMMENT '章节顺序',
+                                 text_content LONGTEXT COMMENT '章节文本',
+                                 page_start INT DEFAULT NULL COMMENT '起始页码',
+                                 page_end INT DEFAULT NULL COMMENT '结束页码',
+                                 anchor_text VARCHAR(512) DEFAULT NULL COMMENT '页内定位锚点文本',
+                                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                                 INDEX idx_patent_sections_patent (patent_id),
+                                 INDEX idx_patent_sections_type (section_type),
+                                 UNIQUE KEY uk_patent_sections_order (patent_id, section_order),
+                                 CONSTRAINT fk_patent_sections_patent FOREIGN KEY (patent_id) REFERENCES patent_documents(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='专利章节表';
+
+CREATE TABLE patent_claims (
+                               id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '权利要求主键',
+                               patent_id BIGINT NOT NULL COMMENT '关联 patent_documents.id',
+                               claim_no INT NOT NULL COMMENT '权利要求编号',
+                               text_content LONGTEXT NOT NULL COMMENT '权利要求文本',
+                               is_independent BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否独立权利要求',
+                               depends_on_claim_no INT DEFAULT NULL COMMENT '依赖的权利要求编号',
+                               technical_features_json JSON COMMENT '技术特征拆解 JSON',
+                               page_number INT DEFAULT NULL COMMENT 'PDF 页码',
+                               anchor_text VARCHAR(512) DEFAULT NULL COMMENT '页内定位锚点文本',
+                               created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                               updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                               UNIQUE KEY uk_patent_claims_no (patent_id, claim_no),
+                               INDEX idx_patent_claims_patent (patent_id),
+                               INDEX idx_patent_claims_independent (is_independent),
+                               INDEX idx_patent_claims_depends_on (depends_on_claim_no),
+                               CONSTRAINT fk_patent_claims_patent FOREIGN KEY (patent_id) REFERENCES patent_documents(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='专利权利要求表';
+
+CREATE TABLE patent_chunks (
+                               id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '专利检索块主键',
+                               patent_id BIGINT NOT NULL COMMENT '关联 patent_documents.id',
+                               source_type VARCHAR(50) NOT NULL COMMENT '来源类型：BIBLIOGRAPHIC/ABSTRACT/CLAIM/DESCRIPTION/DRAWING等',
+                               source_id BIGINT DEFAULT NULL COMMENT '来源表主键，如 patent_claims.id 或 patent_sections.id',
+                               chunk_no INT NOT NULL COMMENT '同一专利内的检索块序号',
+                               text_content LONGTEXT NOT NULL COMMENT '检索块文本',
+                               page_number INT DEFAULT NULL COMMENT 'PDF 页码',
+                               anchor_text VARCHAR(512) DEFAULT NULL COMMENT '页内定位锚点文本',
+                               section_path VARCHAR(500) DEFAULT NULL COMMENT '章节路径',
+                               claim_no INT DEFAULT NULL COMMENT '对应权利要求编号',
+                               is_independent_claim BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否独立权利要求块',
+                               token_count INT DEFAULT NULL COMMENT 'token 数',
+                               model_version VARCHAR(32) DEFAULT NULL COMMENT '向量模型版本',
+                               created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                               updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                               UNIQUE KEY uk_patent_chunks_no (patent_id, chunk_no),
+                               INDEX idx_patent_chunks_patent (patent_id),
+                               INDEX idx_patent_chunks_source (source_type, source_id),
+                               INDEX idx_patent_chunks_claim_no (claim_no),
+                               INDEX idx_patent_chunks_independent_claim (is_independent_claim),
+                               CONSTRAINT fk_patent_chunks_patent FOREIGN KEY (patent_id) REFERENCES patent_documents(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='专利检索块表';
 
 CREATE TABLE rate_limit_configs (
                                     config_key VARCHAR(64) PRIMARY KEY COMMENT '限流配置键',

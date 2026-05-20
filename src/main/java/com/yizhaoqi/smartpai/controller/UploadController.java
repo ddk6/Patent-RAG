@@ -6,6 +6,7 @@ import com.yizhaoqi.smartpai.model.FileProcessingTask;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.OrganizationTag;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
+import com.yizhaoqi.smartpai.service.DocumentTypeResolver;
 import com.yizhaoqi.smartpai.service.FileTypeValidationService;
 import com.yizhaoqi.smartpai.service.ParseService;
 import com.yizhaoqi.smartpai.service.UploadService;
@@ -52,6 +53,9 @@ public class UploadController {
     @Autowired
     private ParseService parseService;
 
+    @Autowired
+    private DocumentTypeResolver documentTypeResolver;
+
     public UploadController(UploadService uploadService, KafkaTemplate<String, Object> kafkaTemplate) {
         this.uploadService = uploadService;
         this.kafkaTemplate = kafkaTemplate;
@@ -80,6 +84,7 @@ public class UploadController {
             @RequestParam(value = "totalChunks", required = false) Integer totalChunks,
             @RequestParam(value = "orgTag", required = false) String orgTag,
             @RequestParam(value = "isPublic", required = false, defaultValue = "false") boolean isPublic,
+            @RequestParam(value = "documentType", required = false) String documentType,
             @RequestParam("file") MultipartFile file,
             @RequestAttribute("userId") String userId) throws IOException {
         
@@ -113,9 +118,10 @@ public class UploadController {
             
             String fileType = getFileType(fileName);
             String contentType = file.getContentType();
+            String resolvedDocumentType = documentTypeResolver.resolve(documentType, fileName);
             
-            LogUtils.logBusiness("UPLOAD_CHUNK", userId, "接收到分片上传请求: fileMd5=%s, chunkIndex=%d, fileName=%s, fileType=%s, contentType=%s, fileSize=%d, totalSize=%d, orgTag=%s, isPublic=%s", 
-                    fileMd5, chunkIndex, fileName, fileType, contentType, file.getSize(), totalSize, orgTag, isPublic);
+            LogUtils.logBusiness("UPLOAD_CHUNK", userId, "接收到分片上传请求: fileMd5=%s, chunkIndex=%d, fileName=%s, fileType=%s, contentType=%s, fileSize=%d, totalSize=%d, orgTag=%s, isPublic=%s, documentType=%s",
+                    fileMd5, chunkIndex, fileName, fileType, contentType, file.getSize(), totalSize, orgTag, isPublic, resolvedDocumentType);
         
             // 如果未指定组织标签，则获取用户的主组织标签
             //这是为了确保文件上传到正确的组织下
@@ -171,6 +177,12 @@ public class UploadController {
             // 这里会调用uploadService的uploadChunk方法，来上传分片
             // 上传分片时，会将分片的MD5值、分片的存储路径等信息保存到数据库
             uploadService.uploadChunk(fileMd5, chunkIndex, totalSize, fileName, file, orgTag, isPublic, userId);
+            String effectiveDocumentType = applyUploadDocumentType(
+                    fileMd5,
+                    userId,
+                    resolvedDocumentType,
+                    documentTypeResolver.hasExplicitDocumentType(documentType)
+            );
 
             //获取已上传的分片索引列表  用来计算上传进度
             List<Integer> uploadedChunks = uploadService.getUploadedChunks(fileMd5, userId);
@@ -185,6 +197,7 @@ public class UploadController {
             Map<String, Object> data = new HashMap<>();
             data.put("uploaded", uploadedChunks);
             data.put("progress", progress);
+            data.put("documentType", effectiveDocumentType);
             
             // 构建统一响应格式
             Map<String, Object> response = new HashMap<>();
@@ -251,6 +264,9 @@ public class UploadController {
             data.put("progress", progress);
             data.put("fileName", fileName);
             data.put("fileType", fileType);
+            data.put("documentType", fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId)
+                    .map(FileUpload::getDocumentType)
+                    .orElse(FileUpload.DOCUMENT_TYPE_GENERAL));
             
             // 构建统一响应格式
             Map<String, Object> response = new HashMap<>();
@@ -292,8 +308,10 @@ public class UploadController {
         LogUtils.PerformanceMonitor monitor = LogUtils.startPerformanceMonitor("MERGE_FILE");
         try {
             String fileType = getFileType(request.fileName());
-            LogUtils.logBusiness("MERGE_FILE", userId, "接收到合并文件请求: fileMd5=%s, fileName=%s, fileType=%s", 
-                    request.fileMd5(), request.fileName(), fileType);
+            String resolvedDocumentType = documentTypeResolver.resolve(request.documentType(), request.fileName());
+            boolean explicitDocumentType = documentTypeResolver.hasExplicitDocumentType(request.documentType());
+            LogUtils.logBusiness("MERGE_FILE", userId, "接收到合并文件请求: fileMd5=%s, fileName=%s, fileType=%s, documentType=%s",
+                    request.fileMd5(), request.fileName(), fileType, resolvedDocumentType);
             
             // 检查文件完整性和权限
             //这里检查的是
@@ -318,9 +336,12 @@ public class UploadController {
             //检查文件是否已完成合并
             //如果文件已完成合并，直接返回合并后的文件访问URL
             if (fileUpload.getStatus() == FileUpload.STATUS_COMPLETED) {
+                if (explicitDocumentType && !resolvedDocumentType.equals(normalizeStoredDocumentType(fileUpload.getDocumentType()))) {
+                    throw new CustomException("文件已完成合并，不能变更 documentType", HttpStatus.CONFLICT);
+                }
                 LogUtils.logBusiness("MERGE_FILE", userId, "文件已完成合并，按幂等成功返回: fileMd5=%s, fileName=%s", request.fileMd5(), request.fileName());
                 monitor.end("文件已完成合并");
-                return buildAlreadyMergedResponse(request.fileMd5());
+                return buildAlreadyMergedResponse(request.fileMd5(), fileUpload.getDocumentType());
             }
 
             if (fileUpload.getStatus() == FileUpload.STATUS_MERGING) {
@@ -353,9 +374,12 @@ public class UploadController {
                 FileUpload latestFileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(request.fileMd5(), userId)
                         .orElseThrow(() -> new RuntimeException("文件记录不存在"));
                 if (latestFileUpload.getStatus() == FileUpload.STATUS_COMPLETED) {
+                    if (explicitDocumentType && !resolvedDocumentType.equals(normalizeStoredDocumentType(latestFileUpload.getDocumentType()))) {
+                        throw new CustomException("文件已完成合并，不能变更 documentType", HttpStatus.CONFLICT);
+                    }
                     LogUtils.logBusiness("MERGE_FILE", userId, "文件已被其他请求合并完成，按幂等成功返回: fileMd5=%s, fileName=%s", request.fileMd5(), request.fileName());
                     monitor.end("文件已完成合并");
-                    return buildAlreadyMergedResponse(request.fileMd5());
+                    return buildAlreadyMergedResponse(request.fileMd5(), latestFileUpload.getDocumentType());
                 }
                 if (latestFileUpload.getStatus() == FileUpload.STATUS_MERGING) {
                     throw new CustomException("文件正在合并中，请稍后重试", HttpStatus.CONFLICT);
@@ -365,6 +389,13 @@ public class UploadController {
 
             fileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(request.fileMd5(), userId)
                     .orElseThrow(() -> new RuntimeException("文件记录不存在"));
+            String effectiveDocumentType = applyUploadDocumentType(
+                    request.fileMd5(),
+                    userId,
+                    resolvedDocumentType,
+                    explicitDocumentType
+            );
+            fileUpload.setDocumentType(effectiveDocumentType);
 
             // 合并文件
             LogUtils.logBusiness("MERGE_FILE", userId, "开始合并文件分片: fileMd5=%s, fileName=%s, fileType=%s, 分片数量=%d", request.fileMd5(), request.fileName(), fileType, totalChunks);
@@ -406,8 +437,8 @@ public class UploadController {
             }
 
             // 发送任务到 Kafka，包含完整的权限信息
-            LogUtils.logBusiness("MERGE_FILE", userId, "创建文件处理任务: fileMd5=%s, fileName=%s, fileType=%s, orgTag=%s, isPublic=%s", 
-                    request.fileMd5(), request.fileName(), fileType, fileUpload.getOrgTag(), fileUpload.isPublic());
+            LogUtils.logBusiness("MERGE_FILE", userId, "创建文件处理任务: fileMd5=%s, fileName=%s, fileType=%s, orgTag=%s, isPublic=%s, documentType=%s",
+                    request.fileMd5(), request.fileName(), fileType, fileUpload.getOrgTag(), fileUpload.isPublic(), effectiveDocumentType);
             
             FileProcessingTask task = new FileProcessingTask(
                     request.fileMd5(),
@@ -429,6 +460,7 @@ public class UploadController {
             // 构建数据对象
             Map<String, Object> data = new HashMap<>();
             data.put("object_url", objectUrl);
+            data.put("documentType", effectiveDocumentType);
             if (embeddingEstimate != null) {
                 data.put("estimatedEmbeddingTokens", embeddingEstimate.estimatedTokens());
                 data.put("estimatedChunkCount", embeddingEstimate.estimatedChunkCount());
@@ -467,15 +499,52 @@ public class UploadController {
     //这是构建文件已完成合并的响应
     //传入的是文件MD5值
     //返回文件已完成合并的响应
-    private ResponseEntity<Map<String, Object>> buildAlreadyMergedResponse(String fileMd5) throws Exception {
+    private ResponseEntity<Map<String, Object>> buildAlreadyMergedResponse(String fileMd5, String documentType) throws Exception {
         Map<String, Object> data = new HashMap<>();
         data.put("object_url", uploadService.generateMergedObjectUrl(fileMd5));
+        data.put("documentType", normalizeStoredDocumentType(documentType));
 
         Map<String, Object> response = new HashMap<>();
         response.put("code", 200);
         response.put("message", "文件已完成合并");
         response.put("data", data);
         return ResponseEntity.ok(response);
+    }
+
+    private String applyUploadDocumentType(String fileMd5,
+                                           String userId,
+                                           String resolvedDocumentType,
+                                           boolean explicitDocumentType) {
+        String normalizedDocumentType = normalizeStoredDocumentType(resolvedDocumentType);
+        Optional<FileUpload> upload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId);
+        if (upload.isEmpty()) {
+            return normalizedDocumentType;
+        }
+
+        FileUpload fileUpload = upload.get();
+        String currentDocumentType = normalizeStoredDocumentType(fileUpload.getDocumentType());
+        boolean shouldUpdate = explicitDocumentType
+                || fileUpload.getDocumentType() == null
+                || fileUpload.getDocumentType().isBlank()
+                || (FileUpload.DOCUMENT_TYPE_GENERAL.equals(currentDocumentType)
+                && FileUpload.DOCUMENT_TYPE_PATENT.equals(normalizedDocumentType));
+
+        if (shouldUpdate && !normalizedDocumentType.equals(currentDocumentType)) {
+            fileUpload.setDocumentType(normalizedDocumentType);
+            fileUploadRepository.save(fileUpload);
+            LogUtils.logBusiness("UPLOAD_DOCUMENT_TYPE", userId,
+                    "更新上传文件 documentType: fileMd5=%s, from=%s, to=%s, explicit=%s",
+                    fileMd5, currentDocumentType, normalizedDocumentType, explicitDocumentType);
+        }
+
+        return shouldUpdate ? normalizedDocumentType : currentDocumentType;
+    }
+
+    private String normalizeStoredDocumentType(String documentType) {
+        if (FileUpload.DOCUMENT_TYPE_PATENT.equalsIgnoreCase(documentType)) {
+            return FileUpload.DOCUMENT_TYPE_PATENT;
+        }
+        return FileUpload.DOCUMENT_TYPE_GENERAL;
     }
 
     /**
@@ -521,7 +590,11 @@ public class UploadController {
     /**
      * 合并请求的辅助类，包含文件的MD5值和文件名
      */
-    public record MergeRequest(String fileMd5, String fileName) {}
+    public record MergeRequest(String fileMd5, String fileName, String documentType) {
+        public MergeRequest(String fileMd5, String fileName) {
+            this(fileMd5, fileName, null);
+        }
+    }
 
     /**
      * 获取支持的文件类型列表接口

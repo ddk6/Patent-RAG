@@ -12,6 +12,13 @@ import com.yizhaoqi.smartpai.repository.MinerUParseResultRepository;
 import com.yizhaoqi.smartpai.service.MinerUService;
 import com.yizhaoqi.smartpai.service.ParseService;
 import com.yizhaoqi.smartpai.service.VectorizationService;
+import com.yizhaoqi.smartpai.service.patent.PatentDocumentDetector;
+import com.yizhaoqi.smartpai.service.patent.PatentIngestionService;
+import com.yizhaoqi.smartpai.service.patent.PatentParserClient;
+import com.yizhaoqi.smartpai.service.patent.PatentVectorizationService;
+import com.yizhaoqi.smartpai.service.patent.dto.PatentParserRequest;
+import com.yizhaoqi.smartpai.service.patent.dto.PatentParserResult;
+import com.yizhaoqi.smartpai.model.patent.PatentDocument;
 import io.minio.errors.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,6 +46,10 @@ public class FileProcessingConsumer {
     private final DocumentVectorRepository documentVectorRepository;
     private final MinerUService minerUService;
     private final MinerUProperties minerUProperties;
+    private final PatentDocumentDetector patentDocumentDetector;
+    private final PatentIngestionService patentIngestionService;
+    private final PatentParserClient patentParserClient;
+    private final PatentVectorizationService patentVectorizationService;
     @Autowired
     private KafkaConfig kafkaConfig;
 
@@ -50,7 +61,11 @@ public class FileProcessingConsumer {
             MinerUParseResultRepository mineruParseResultRepository,
             DocumentVectorRepository documentVectorRepository,
             MinerUService minerUService,
-            MinerUProperties minerUProperties
+            MinerUProperties minerUProperties,
+            PatentDocumentDetector patentDocumentDetector,
+            PatentIngestionService patentIngestionService,
+            PatentParserClient patentParserClient,
+            PatentVectorizationService patentVectorizationService
     ) {
         this.parseService = parseService;
         this.vectorizationService = vectorizationService;
@@ -59,6 +74,10 @@ public class FileProcessingConsumer {
         this.documentVectorRepository = documentVectorRepository;
         this.minerUService = minerUService;
         this.minerUProperties = minerUProperties;
+        this.patentDocumentDetector = patentDocumentDetector;
+        this.patentIngestionService = patentIngestionService;
+        this.patentParserClient = patentParserClient;
+        this.patentVectorizationService = patentVectorizationService;
     }
 
     //这是处理文件解析任务的方法
@@ -85,9 +104,13 @@ public class FileProcessingConsumer {
         // 这个表的字段有：fileMd5, parser, status, createdAt, updatedAt
         //这个表存在哪？
         // 这个表存在数据库中
-        updateParseStatus(task, "PROCESSING", "MINERU");
+        updateParseStatus(task, "PROCESSING", resolveInitialParseMethod(task));
 
         try {
+            if (isPatentDocumentRequested(task) && !minerUProperties.isEnabled()) {
+                throw new IllegalStateException("专利链路当前依赖 MinerU 结构化解析，请启用 mineru.enabled");
+            }
+
             // ========== 根据配置选择解析器 ==========
             if (minerUProperties.isEnabled()) {
                 // ========== MinerU 解析流程 ==========
@@ -108,6 +131,11 @@ public class FileProcessingConsumer {
         //
         catch (Exception e) {
             log.error("文件解析失败: fileMd5={}", task.getFileMd5(), e);
+
+            if (isPatentDocumentRequested(task)) {
+                updateParseStatus(task, "FAILED", "PATENT");
+                throw new RuntimeException("Patent document processing failed", e);
+            }
 
             // 检查是否应该降级到 Tika
             if (minerUProperties.isEnabled() && isMinerURelatedError(e)) {
@@ -154,6 +182,16 @@ public class FileProcessingConsumer {
             //这个表是MinerU解析结果的存储表 字段有：fileMd5, parser, status, createdAt, updatedAt
             //这个表存在数据库中
             saveMinerUResult(task.getFileMd5(), parseResult);
+
+            PatentRoute patentRoute = resolvePatentRoute(task, parseResult);
+            if (patentRoute != PatentRoute.NONE) {
+                boolean patentHandled = processPatentParseResult(task, parseResult, patentRoute == PatentRoute.AUTO);
+                if (patentHandled) {
+                    log.info("[Patent] 专利链路处理完成，跳过通用 chunk/vectorize: fileMd5={}", task.getFileMd5());
+                    return;
+                }
+                log.warn("[Patent] 自动识别专利链路未完成，降级继续通用 MinerU 链路: fileMd5={}", task.getFileMd5());
+            }
 
             // 4. V3: 保存 chunks 到 document_vectors 表（带 V3 metadata）
             //这个表存的是分块后的文本内容
@@ -342,6 +380,120 @@ public class FileProcessingConsumer {
         } catch (Exception e) {
             log.warn("更新解析状态失败: fileMd5={}", fileMd5, e);
         }
+    }
+
+    private boolean processPatentParseResult(
+            FileProcessingTask task,
+            MinerUService.MinerUParseResult minerUParseResult,
+            boolean autoDetected
+    ) {
+        FileUpload fileUpload = findLatestFileUpload(task.getFileMd5(), task.getUserId())
+                .orElseThrow(() -> new IllegalStateException("文件记录不存在: " + task.getFileMd5()));
+        PatentDocument patentDocument = null;
+
+        try {
+            if (!autoDetected) {
+                updateParseStatus(task, "PATENT_STRUCTURING", "PATENT");
+            }
+            PatentParserResult parserResult = patentParserClient.parse(new PatentParserRequest(
+                    task.getFileMd5(),
+                    task.getFileName(),
+                    minerUParseResult.getFullMd(),
+                    minerUParseResult.getContentJson(),
+                    minerUParseResult.getLayoutJson()
+            ));
+
+            validatePatentParserResult(parserResult);
+
+            if (autoDetected) {
+                updateParseStatus(task, "PATENT_STRUCTURING", "PATENT");
+            }
+
+            patentDocument = patentIngestionService.begin(task, fileUpload);
+            patentDocument = patentIngestionService.saveParserResult(patentDocument.getId(), parserResult);
+
+            fileUpload.setDocumentType(FileUpload.DOCUMENT_TYPE_PATENT);
+            fileUploadRepository.save(fileUpload);
+
+            updateParseStatus(task, "PATENT_VECTORIZING", "PATENT");
+            VectorizationService.VectorizationUsageResult vectorizationResult = patentVectorizationService.vectorizeWithUsage(
+                    patentDocument.getId(),
+                    task.getUserId()
+            );
+            updateActualEmbeddingUsage(task, vectorizationResult);
+
+            updateParseStatus(task, "COMPLETED", "PATENT");
+            return true;
+        } catch (Exception e) {
+            if (autoDetected) {
+                if (patentDocument != null) {
+                    patentIngestionService.markFailed(patentDocument.getId(), e.getMessage());
+                }
+                fileUpload.setDocumentType(FileUpload.DOCUMENT_TYPE_GENERAL);
+                fileUploadRepository.save(fileUpload);
+                log.warn("[Patent] 自动专利解析失败，将回退通用链路: fileMd5={}, error={}",
+                        task.getFileMd5(), e.getMessage(), e);
+                return false;
+            }
+
+            if (patentDocument == null) {
+                patentDocument = patentIngestionService.begin(task, fileUpload);
+            }
+            patentIngestionService.markFailed(patentDocument.getId(), e.getMessage());
+            updateParseStatus(task, "FAILED", "PATENT");
+            throw new RuntimeException("专利解析失败: " + e.getMessage(), e);
+        }
+    }
+
+    private PatentRoute resolvePatentRoute(FileProcessingTask task, MinerUService.MinerUParseResult parseResult) {
+        if (isPatentDocumentRequested(task)) {
+            return PatentRoute.EXPLICIT;
+        }
+        return patentDocumentDetector.isPatent(parseResult, task.getFileName()) ? PatentRoute.AUTO : PatentRoute.NONE;
+    }
+
+    private String resolveInitialParseMethod(FileProcessingTask task) {
+        if (isPatentDocumentRequested(task)) {
+            return "PATENT";
+        }
+        return minerUProperties.isEnabled() ? "MINERU" : "TIKA";
+    }
+
+    private boolean isPatentDocumentRequested(FileProcessingTask task) {
+        if (task == null || task.getFileMd5() == null) {
+            return false;
+        }
+        return findLatestFileUpload(task.getFileMd5(), task.getUserId())
+                .map(fileUpload -> FileUpload.DOCUMENT_TYPE_PATENT.equalsIgnoreCase(fileUpload.getDocumentType()))
+                .orElse(false);
+    }
+
+    private void validatePatentParserResult(PatentParserResult parserResult) {
+        if (parserResult == null) {
+            throw new IllegalStateException("专利解析服务返回空结果");
+        }
+
+        boolean hasClaims = parserResult.getClaims() != null && !parserResult.getClaims().isEmpty();
+        boolean hasSections = parserResult.getSections() != null && !parserResult.getSections().isEmpty();
+        boolean hasChunks = parserResult.getChunks() != null && !parserResult.getChunks().isEmpty();
+        boolean hasMetadata = parserResult.getMetadata() != null
+                && (notBlank(parserResult.getMetadata().getApplicationNumber())
+                || notBlank(parserResult.getMetadata().getPublicationNumber())
+                || notBlank(parserResult.getMetadata().getTitle()));
+
+        if (!hasChunks || (!hasClaims && !hasSections && !hasMetadata)) {
+            throw new IllegalStateException("专利解析结果缺少有效结构化内容");
+        }
+    }
+
+    private boolean notBlank(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private enum PatentRoute {
+        NONE,
+        EXPLICIT,
+        AUTO
     }
 
     private Optional<FileUpload> findLatestFileUpload(String fileMd5, String userId) {
