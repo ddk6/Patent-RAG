@@ -14,7 +14,6 @@ import org.apache.http.ConnectionClosedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
 import java.io.StringReader;
 import java.net.ConnectException;
@@ -34,7 +33,10 @@ public class EsIndexInitializer implements CommandLineRunner {
     private ElasticsearchClient esClient;
 
     @Value("classpath:es-mappings/knowledge_base.json") // 加载 JSON 文件
-    private org.springframework.core.io.Resource mappingResource;
+    private org.springframework.core.io.Resource knowledgeBaseMappingResource;
+
+    @Value("classpath:es-mappings/patent_chunks.json")
+    private org.springframework.core.io.Resource patentChunksMappingResource;
 
     @Value("${elasticsearch.host}")
     private String host;
@@ -51,7 +53,7 @@ public class EsIndexInitializer implements CommandLineRunner {
     @Override
     public void run(String... args) throws Exception {
         try {
-            logger.info("正在初始化索引 'knowledge_base'... endpoint={}://{}:{}, username={}",
+            logger.info("正在初始化 Elasticsearch 索引... endpoint={}://{}:{}, username={}",
                     scheme, host, port, maskUsername(username));
             initializeIndex();
         } catch (Exception exception) {
@@ -80,12 +82,16 @@ public class EsIndexInitializer implements CommandLineRunner {
      * @throws Exception
      */
     private void initializeIndex() throws Exception {
-        // 检查索引是否存在
-        BooleanResponse existsResponse = esClient.indices().exists(ExistsRequest.of(e -> e.index("knowledge_base")));
+        ensureIndex("knowledge_base", knowledgeBaseMappingResource);
+        ensureIndex("patent_chunks", patentChunksMappingResource);
+    }
+
+    private void ensureIndex(String indexName, org.springframework.core.io.Resource mappingResource) throws Exception {
+        BooleanResponse existsResponse = esClient.indices().exists(ExistsRequest.of(e -> e.index(indexName)));
         if (!existsResponse.value()) {
-            createIndex();
+            createIndex(indexName, mappingResource);
         } else {
-            logger.info("索引 'knowledge_base' 已存在");
+            logger.info("索引 '{}' 已存在", indexName);
         }
     }
 
@@ -93,7 +99,7 @@ public class EsIndexInitializer implements CommandLineRunner {
      * 创建索引
      * @throws Exception
      */
-    private void createIndex() throws Exception {
+    private void createIndex(String indexName, org.springframework.core.io.Resource mappingResource) throws Exception {
         // 读取 JSON 文件内容，使用 InputStream 方式支持 JAR 包内资源
         String mappingJson;
         try (var inputStream = mappingResource.getInputStream()) {
@@ -101,11 +107,11 @@ public class EsIndexInitializer implements CommandLineRunner {
         }
         // 创建索引并应用映射
         CreateIndexRequest createIndexRequest = CreateIndexRequest.of(c -> c
-                .index("knowledge_base") // 索引名称
+                .index(indexName) // 索引名称
                 .withJson(new StringReader(mappingJson)) // 使用 JSON 文件定义映射
         );
         esClient.indices().create(createIndexRequest);
-        logger.info("索引 'knowledge_base' 已创建");
+        logger.info("索引 '{}' 已创建", indexName);
     }
 
     private String buildDiagnosticMessage(Exception exception) {

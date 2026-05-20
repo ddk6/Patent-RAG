@@ -263,6 +263,7 @@ public class DocumentController {
             dto.put("estimatedChunkCount", file.getEstimatedChunkCount());
             dto.put("actualEmbeddingTokens", file.getActualEmbeddingTokens());
             dto.put("actualChunkCount", file.getActualChunkCount());
+            dto.put("documentType", file.getDocumentType());
             dto.put("orgTagName", getOrgTagName(file.getOrgTag()));
             return dto;
         }).collect(Collectors.toList());
