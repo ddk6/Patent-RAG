@@ -2,6 +2,7 @@ package com.yizhaoqi.smartpai.consumer;
 
 import com.yizhaoqi.smartpai.config.KafkaConfig;
 import com.yizhaoqi.smartpai.config.MinerUProperties;
+import com.yizhaoqi.smartpai.config.PatentParserProperties;
 import com.yizhaoqi.smartpai.model.DocumentVector;
 import com.yizhaoqi.smartpai.model.FileProcessingTask;
 import com.yizhaoqi.smartpai.model.FileUpload;
@@ -14,6 +15,7 @@ import com.yizhaoqi.smartpai.service.ParseService;
 import com.yizhaoqi.smartpai.service.VectorizationService;
 import com.yizhaoqi.smartpai.service.patent.PatentDocumentDetector;
 import com.yizhaoqi.smartpai.service.patent.PatentIngestionService;
+import com.yizhaoqi.smartpai.service.patent.PatentParseQualityEvaluator;
 import com.yizhaoqi.smartpai.service.patent.PatentParserClient;
 import com.yizhaoqi.smartpai.service.patent.PatentVectorizationService;
 import com.yizhaoqi.smartpai.service.patent.dto.PatentParserRequest;
@@ -46,8 +48,10 @@ public class FileProcessingConsumer {
     private final DocumentVectorRepository documentVectorRepository;
     private final MinerUService minerUService;
     private final MinerUProperties minerUProperties;
+    private final PatentParserProperties patentParserProperties;
     private final PatentDocumentDetector patentDocumentDetector;
     private final PatentIngestionService patentIngestionService;
+    private final PatentParseQualityEvaluator patentParseQualityEvaluator;
     private final PatentParserClient patentParserClient;
     private final PatentVectorizationService patentVectorizationService;
     @Autowired
@@ -62,8 +66,10 @@ public class FileProcessingConsumer {
             DocumentVectorRepository documentVectorRepository,
             MinerUService minerUService,
             MinerUProperties minerUProperties,
+            PatentParserProperties patentParserProperties,
             PatentDocumentDetector patentDocumentDetector,
             PatentIngestionService patentIngestionService,
+            PatentParseQualityEvaluator patentParseQualityEvaluator,
             PatentParserClient patentParserClient,
             PatentVectorizationService patentVectorizationService
     ) {
@@ -74,8 +80,10 @@ public class FileProcessingConsumer {
         this.documentVectorRepository = documentVectorRepository;
         this.minerUService = minerUService;
         this.minerUProperties = minerUProperties;
+        this.patentParserProperties = patentParserProperties;
         this.patentDocumentDetector = patentDocumentDetector;
         this.patentIngestionService = patentIngestionService;
+        this.patentParseQualityEvaluator = patentParseQualityEvaluator;
         this.patentParserClient = patentParserClient;
         this.patentVectorizationService = patentVectorizationService;
     }
@@ -107,8 +115,13 @@ public class FileProcessingConsumer {
         updateParseStatus(task, "PROCESSING", resolveInitialParseMethod(task));
 
         try {
-            if (isPatentDocumentRequested(task) && !minerUProperties.isEnabled()) {
-                throw new IllegalStateException("专利链路当前依赖 MinerU 结构化解析，请启用 mineru.enabled");
+            if (isPatentDocumentRequested(task)) {
+                if (processPatentDirectParse(task)) {
+                    return;
+                }
+                if (!minerUProperties.isEnabled()) {
+                    throw new IllegalStateException("专利直提未通过质量门禁，且 MinerU 未启用，无法继续专利链路");
+                }
             }
 
             // ========== 根据配置选择解析器 ==========
@@ -410,19 +423,7 @@ public class FileProcessingConsumer {
             }
 
             patentDocument = patentIngestionService.begin(task, fileUpload);
-            patentDocument = patentIngestionService.saveParserResult(patentDocument.getId(), parserResult);
-
-            fileUpload.setDocumentType(FileUpload.DOCUMENT_TYPE_PATENT);
-            fileUploadRepository.save(fileUpload);
-
-            updateParseStatus(task, "PATENT_VECTORIZING", "PATENT");
-            VectorizationService.VectorizationUsageResult vectorizationResult = patentVectorizationService.vectorizeWithUsage(
-                    patentDocument.getId(),
-                    task.getUserId()
-            );
-            updateActualEmbeddingUsage(task, vectorizationResult);
-
-            updateParseStatus(task, "COMPLETED", "PATENT");
+            persistAndVectorizePatentResult(task, fileUpload, patentDocument, parserResult, "PATENT");
             return true;
         } catch (Exception e) {
             if (autoDetected) {
@@ -443,6 +444,76 @@ public class FileProcessingConsumer {
             updateParseStatus(task, "FAILED", "PATENT");
             throw new RuntimeException("专利解析失败: " + e.getMessage(), e);
         }
+    }
+
+    private boolean processPatentDirectParse(FileProcessingTask task) {
+        if (!patentParserProperties.isDirectEnabled()) {
+            return false;
+        }
+
+        FileUpload fileUpload = findLatestFileUpload(task.getFileMd5(), task.getUserId())
+                .orElseThrow(() -> new IllegalStateException("文件记录不存在: " + task.getFileMd5()));
+
+        log.info("[Patent] 尝试专利直提快路径: fileMd5={}, fileName={}", task.getFileMd5(), task.getFileName());
+        PatentDocument patentDocument = null;
+        boolean acceptedDirectResult = false;
+        try {
+            updateParseStatus(task, "DIRECT_STRUCTURING", "PATENT_DIRECT");
+            PatentParserResult parserResult = patentParserClient.parse(PatentParserRequest.directPdf(
+                    task.getFileMd5(),
+                    task.getFileName(),
+                    task.getFilePath()
+            ));
+            PatentParseQualityEvaluator.Evaluation evaluation = patentParseQualityEvaluator.evaluate(parserResult);
+            if (!evaluation.acceptable()) {
+                updateParseStatus(task, "DIRECT_FALLBACK", "PATENT_DIRECT");
+                log.info("[Patent] 专利直提质量不足，回退 MinerU: fileMd5={}, score={}, reasons={}",
+                        task.getFileMd5(), evaluation.score(), evaluation.reasons());
+                return false;
+            }
+
+            validatePatentParserResult(parserResult);
+            acceptedDirectResult = true;
+            patentDocument = patentIngestionService.begin(task, fileUpload);
+            persistAndVectorizePatentResult(task, fileUpload, patentDocument, parserResult, "PATENT_DIRECT");
+            log.info("[Patent] 专利直提快路径完成: fileMd5={}, score={}", task.getFileMd5(), evaluation.score());
+            return true;
+        } catch (Exception e) {
+            if (acceptedDirectResult) {
+                if (patentDocument != null) {
+                    patentIngestionService.markFailed(patentDocument.getId(), e.getMessage());
+                }
+                updateParseStatus(task, "FAILED", "PATENT_DIRECT");
+                throw new RuntimeException("专利直提结果已通过质量门禁，但后续处理失败: " + e.getMessage(), e);
+            }
+            if (patentDocument != null) {
+                patentIngestionService.markFailed(patentDocument.getId(), e.getMessage());
+            }
+            updateParseStatus(task, "DIRECT_FALLBACK", "PATENT_DIRECT");
+            log.warn("[Patent] 专利直提失败，回退 MinerU: fileMd5={}, error={}",
+                    task.getFileMd5(), e.getMessage(), e);
+            return false;
+        }
+    }
+
+    private void persistAndVectorizePatentResult(FileProcessingTask task,
+                                                 FileUpload fileUpload,
+                                                 PatentDocument patentDocument,
+                                                 PatentParserResult parserResult,
+                                                 String parseMethod) {
+        patentDocument = patentIngestionService.saveParserResult(patentDocument.getId(), parserResult);
+
+        fileUpload.setDocumentType(FileUpload.DOCUMENT_TYPE_PATENT);
+        fileUploadRepository.save(fileUpload);
+
+        updateParseStatus(task, "PATENT_VECTORIZING", parseMethod);
+        VectorizationService.VectorizationUsageResult vectorizationResult = patentVectorizationService.vectorizeWithUsage(
+                patentDocument.getId(),
+                task.getUserId()
+        );
+        updateActualEmbeddingUsage(task, vectorizationResult);
+
+        updateParseStatus(task, "COMPLETED", parseMethod);
     }
 
     private PatentRoute resolvePatentRoute(FileProcessingTask task, MinerUService.MinerUParseResult parseResult) {

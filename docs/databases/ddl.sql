@@ -37,7 +37,7 @@ CREATE TABLE file_upload (
                              actual_embedding_tokens BIGINT DEFAULT NULL COMMENT '实际 embedding token 数',
                              actual_chunk_count INT DEFAULT NULL COMMENT '实际切片数',
                              document_type VARCHAR(32) NOT NULL DEFAULT 'GENERAL' COMMENT '文档类型：GENERAL通用文档 PATENT专利文档',
-                             parse_method VARCHAR(20) DEFAULT NULL COMMENT '解析方法：TIKA/MINERU/PATENT',
+                             parse_method VARCHAR(20) DEFAULT NULL COMMENT '解析方法：TIKA/MINERU/PATENT/PATENT_DIRECT',
                              parse_status VARCHAR(20) DEFAULT NULL COMMENT '解析状态：PENDING/PROCESSING/COMPLETED/FAILED',
                              parsed_at TIMESTAMP NULL DEFAULT NULL COMMENT '解析完成时间',
                              created_at   TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
