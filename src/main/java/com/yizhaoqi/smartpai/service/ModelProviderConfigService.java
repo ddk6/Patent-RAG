@@ -27,18 +27,19 @@ public class ModelProviderConfigService {
     public static final String SCOPE_LLM = "llm";
     public static final String SCOPE_EMBEDDING = "embedding";
     public static final String API_STYLE_OPENAI = "openai-compatible";
+    private static final String CHAT_COMPLETIONS_PATH = "/chat/completions";
 
     private final ModelProviderConfigRepository repository;
     private final SecretCryptoService secretCryptoService;
     private volatile ModelProviderSettingsView currentSettings;
 
-    @Value("${deepseek.api.url:https://api.deepseek.com/v1}")
+    @Value("${deepseek.api.url:https://api.modelarts-maas.com/v2}")
     private String deepSeekApiUrl;
 
     @Value("${deepseek.api.key:}")
     private String deepSeekApiKey;
 
-    @Value("${deepseek.api.model:deepseek-chat}")
+    @Value("${deepseek.api.model:deepseek-v4-flash}")
     private String deepSeekModel;
 
     @Value("${embedding.api.url:https://dashscope.aliyuncs.com/compatible-mode/v1}")
@@ -111,7 +112,8 @@ public class ModelProviderConfigService {
             entity.setProviderCode(provider);
             entity.setDisplayName(fallback.displayName());
             entity.setApiStyle(fallback.apiStyle());
-            entity.setApiBaseUrl(requireNonBlank(item.apiBaseUrl(), fallback.apiBaseUrl(), provider + " API 地址不能为空"));
+            String apiBaseUrl = requireNonBlank(item.apiBaseUrl(), fallback.apiBaseUrl(), provider + " API 地址不能为空");
+            entity.setApiBaseUrl(normalizeApiBaseUrl(normalizedScope, apiBaseUrl));
             entity.setModelName(requireNonBlank(item.model(), fallback.model(), provider + " 模型不能为空"));
             entity.setEmbeddingDimension(SCOPE_EMBEDDING.equals(normalizedScope)
                     ? Optional.ofNullable(item.dimension()).orElse(fallback.dimension())
@@ -143,8 +145,9 @@ public class ModelProviderConfigService {
 
         long startAt = System.currentTimeMillis();
         try {
+            String apiBaseUrl = normalizeApiBaseUrl(normalizedScope, request.apiBaseUrl());
             WebClient.Builder builder = WebClient.builder()
-                    .baseUrl(request.apiBaseUrl())
+                    .baseUrl(apiBaseUrl)
                     .defaultHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE);
 
             if (request.apiKey() != null && !request.apiKey().isBlank()) {
@@ -196,7 +199,7 @@ public class ModelProviderConfigService {
                 SCOPE_LLM,
                 "deepseek",
                 List.of(
-                        new ProviderConfigView("deepseek", "DeepSeek", API_STYLE_OPENAI, deepSeekApiUrl, deepSeekModel, null, true, true, hasValue(deepSeekApiKey), secretCryptoService.mask(deepSeekApiKey)),
+                        new ProviderConfigView("deepseek", "DeepSeek", API_STYLE_OPENAI, normalizeApiBaseUrl(SCOPE_LLM, deepSeekApiUrl), deepSeekModel, null, true, true, hasValue(deepSeekApiKey), secretCryptoService.mask(deepSeekApiKey)),
                         new ProviderConfigView("qwen", "Qwen", API_STYLE_OPENAI, "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-flash", null, true, false, false, ""),
                         new ProviderConfigView("zhipu", "ZhipuAI", API_STYLE_OPENAI, "https://open.bigmodel.cn/api/paas/v4", "glm-4.5-air", null, true, false, false, "")
                 )
@@ -237,7 +240,7 @@ public class ModelProviderConfigService {
                     config.getProviderCode(),
                     config.getDisplayName(),
                     config.getApiStyle(),
-                    config.getApiBaseUrl(),
+                    normalizeApiBaseUrl(defaults.scope(), config.getApiBaseUrl()),
                     config.getModelName(),
                     config.getEmbeddingDimension() != null ? config.getEmbeddingDimension() : fallback.dimension(),
                     config.isEnabled(),
@@ -271,7 +274,7 @@ public class ModelProviderConfigService {
                 provider.provider(),
                 provider.displayName(),
                 provider.apiStyle(),
-                provider.apiBaseUrl(),
+                normalizeApiBaseUrl(resolveScopeByProvider(provider.provider()), provider.apiBaseUrl()),
                 provider.model(),
                 apiKey,
                 provider.dimension()
@@ -402,6 +405,34 @@ public class ModelProviderConfigService {
         String value = candidate != null && !candidate.isBlank() ? candidate.trim() : fallback;
         if (value == null || value.isBlank()) {
             throw new CustomException(message, HttpStatus.BAD_REQUEST);
+        }
+        return value;
+    }
+
+    public static String normalizeLlmApiBaseUrl(String apiBaseUrl) {
+        if (apiBaseUrl == null) {
+            return null;
+        }
+        String value = trimTrailingSlashes(apiBaseUrl.trim());
+        if (value.toLowerCase(Locale.ROOT).endsWith(CHAT_COMPLETIONS_PATH)) {
+            value = value.substring(0, value.length() - CHAT_COMPLETIONS_PATH.length());
+        }
+        return trimTrailingSlashes(value);
+    }
+
+    private String normalizeApiBaseUrl(String scope, String apiBaseUrl) {
+        if (SCOPE_LLM.equals(scope)) {
+            return normalizeLlmApiBaseUrl(apiBaseUrl);
+        }
+        return trimTrailingSlashes(apiBaseUrl == null ? null : apiBaseUrl.trim());
+    }
+
+    private static String trimTrailingSlashes(String value) {
+        if (value == null) {
+            return null;
+        }
+        while (value.endsWith("/") && value.length() > "https://".length()) {
+            value = value.substring(0, value.length() - 1);
         }
         return value;
     }

@@ -67,9 +67,9 @@ class ModelProviderConfigServiceTest {
         secretCryptoService.init();
 
         service = new ModelProviderConfigService(repository, secretCryptoService);
-        ReflectionTestUtils.setField(service, "deepSeekApiUrl", "https://api.deepseek.com/v1");
+        ReflectionTestUtils.setField(service, "deepSeekApiUrl", "https://api.modelarts-maas.com/v2");
         ReflectionTestUtils.setField(service, "deepSeekApiKey", "sk-default-deepseek");
-        ReflectionTestUtils.setField(service, "deepSeekModel", "deepseek-chat");
+        ReflectionTestUtils.setField(service, "deepSeekModel", "deepseek-v4-flash");
         ReflectionTestUtils.setField(service, "embeddingApiUrl", "https://dashscope.aliyuncs.com/compatible-mode/v1");
         ReflectionTestUtils.setField(service, "embeddingApiKey", "sk-default-embedding");
         ReflectionTestUtils.setField(service, "embeddingModel", "text-embedding-v4");
@@ -94,7 +94,7 @@ class ModelProviderConfigServiceTest {
         ModelProviderConfigService.UpdateScopeRequest request = new ModelProviderConfigService.UpdateScopeRequest(
                 "qwen",
                 List.of(
-                        new ModelProviderConfigService.ProviderUpsertRequest("deepseek", "https://api.deepseek.com/v1", "deepseek-chat", "", null, true),
+                        new ModelProviderConfigService.ProviderUpsertRequest("deepseek", "https://api.modelarts-maas.com/v2/chat/completions", "deepseek-v4-flash", "", null, true),
                         new ModelProviderConfigService.ProviderUpsertRequest("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-flash", "sk-qwen-updated", null, true),
                         new ModelProviderConfigService.ProviderUpsertRequest("zhipu", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5-air", "", null, true)
                 )
@@ -111,6 +111,15 @@ class ModelProviderConfigServiceTest {
         ModelProviderConfig persisted = store.get("llm:qwen");
         assertNotNull(persisted.getApiKeyCiphertext());
         assertFalse(persisted.getApiKeyCiphertext().contains("sk-qwen-updated"));
+        assertEquals("https://api.modelarts-maas.com/v2", store.get("llm:deepseek").getApiBaseUrl());
+    }
+
+    @Test
+    void shouldNormalizeFullChatCompletionsEndpoint() {
+        assertEquals(
+                "https://api.modelarts-maas.com/v2",
+                ModelProviderConfigService.normalizeLlmApiBaseUrl("https://api.modelarts-maas.com/v2/chat/completions/")
+        );
     }
 
     @Test

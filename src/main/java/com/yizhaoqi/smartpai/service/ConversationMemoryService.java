@@ -348,7 +348,7 @@ public class ConversationMemoryService {
     private String callLlm(ModelProviderConfigService.ActiveProviderView provider, String prompt) {
         try {
             WebClient client = WebClient.builder()
-                    .baseUrl(provider.apiBaseUrl())
+                    .baseUrl(ModelProviderConfigService.normalizeLlmApiBaseUrl(provider.apiBaseUrl()))
                     .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                     .build();
 
@@ -358,10 +358,13 @@ public class ConversationMemoryService {
                     "stream", false
             );
 
-            Map<String, Object> response = client.post()
-                    .uri("/chat/completions")
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + provider.apiKey())
-                    .bodyValue(request)
+            WebClient.RequestBodySpec requestSpec = client.post()
+                    .uri("/chat/completions");
+            if (provider.apiKey() != null && !provider.apiKey().isBlank()) {
+                requestSpec.header(HttpHeaders.AUTHORIZATION, "Bearer " + provider.apiKey());
+            }
+
+            Map<String, Object> response = requestSpec.bodyValue(request)
                     .retrieve()
                     .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
                     .block();

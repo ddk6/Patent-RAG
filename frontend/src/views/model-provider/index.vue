@@ -158,11 +158,11 @@ onMounted(() => {
                 <div class="limit-grid">
                   <div>
                     <div class="limit-label">API 地址</div>
-                    <NInput v-model:value="item.apiBaseUrl" />
+                    <NInput v-model:value="item.apiBaseUrl" placeholder="https://api.modelarts-maas.com/v2" />
                   </div>
                   <div>
                     <div class="limit-label">模型</div>
-                    <NInput v-model:value="item.model" />
+                    <NInput v-model:value="item.model" placeholder="deepseek-v4-flash" />
                   </div>
                   <div>
                     <div class="limit-label">现有密钥</div>

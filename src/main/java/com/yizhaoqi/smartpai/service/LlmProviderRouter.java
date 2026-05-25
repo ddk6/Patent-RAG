@@ -80,7 +80,8 @@ public class LlmProviderRouter {
     }
 
     private WebClient buildClient(ModelProviderConfigService.ActiveProviderView provider) {
-        WebClient.Builder builder = WebClient.builder().baseUrl(provider.apiBaseUrl());
+        WebClient.Builder builder = WebClient.builder()
+                .baseUrl(ModelProviderConfigService.normalizeLlmApiBaseUrl(provider.apiBaseUrl()));
         if (provider.apiKey() != null && !provider.apiKey().isBlank()) {
             builder.defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + provider.apiKey());
         }
