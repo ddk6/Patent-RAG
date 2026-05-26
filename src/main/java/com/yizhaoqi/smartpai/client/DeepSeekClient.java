@@ -3,7 +3,6 @@ package com.yizhaoqi.smartpai.client;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.reactive.function.client.WebClient;
 import java.util.List;
 import java.util.Map;
@@ -14,34 +13,22 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.yizhaoqi.smartpai.config.AiProperties;
+import com.yizhaoqi.smartpai.service.ModelProviderConfigService;
 import com.yizhaoqi.smartpai.service.UsageQuotaService;
 
 @Service
 public class DeepSeekClient {
 
-    private final WebClient webClient;
-    private final String apiKey;
-    private final String model;
+    private final ModelProviderConfigService modelProviderConfigService;
     private final AiProperties aiProperties;
     private final UsageQuotaService usageQuotaService;
     private final ObjectMapper objectMapper;
     private static final Logger logger = LoggerFactory.getLogger(DeepSeekClient.class);
     
-    public DeepSeekClient(@Value("${deepseek.api.url}") String apiUrl,
-                         @Value("${deepseek.api.key}") String apiKey,
-                         @Value("${deepseek.api.model}") String model,
+    public DeepSeekClient(ModelProviderConfigService modelProviderConfigService,
                          AiProperties aiProperties,
                          UsageQuotaService usageQuotaService) {
-        WebClient.Builder builder = WebClient.builder().baseUrl(apiUrl);
-        
-        // 只有当 API key 不为空时才添加 Authorization header
-        if (apiKey != null && !apiKey.trim().isEmpty()) {
-            builder.defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
-        }
-        
-        this.webClient = builder.build();
-        this.apiKey = apiKey;
-        this.model = model;
+        this.modelProviderConfigService = modelProviderConfigService;
         this.aiProperties = aiProperties;
         this.usageQuotaService = usageQuotaService;
         this.objectMapper = new ObjectMapper();
@@ -54,7 +41,9 @@ public class DeepSeekClient {
                              Consumer<String> onChunk,
                              Consumer<Throwable> onError) {
         
-        Map<String, Object> request = buildRequest(userMessage, context, history);
+        ModelProviderConfigService.ActiveProviderView provider =
+                modelProviderConfigService.getActiveProvider(ModelProviderConfigService.SCOPE_LLM);
+        Map<String, Object> request = buildRequest(provider.model(), userMessage, context, history);
         @SuppressWarnings("unchecked")
         List<Map<String, String>> messages = (List<Map<String, String>>) request.get("messages");
         int estimatedPromptTokens = usageQuotaService.estimateChatTokens(messages);
@@ -66,7 +55,7 @@ public class DeepSeekClient {
         StreamUsageTracker usageTracker = new StreamUsageTracker(reservation, estimatedPromptTokens);
         
         try {
-            webClient.post()
+            buildClient(provider).post()
                     .uri("/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(request)
@@ -86,7 +75,17 @@ public class DeepSeekClient {
         }
     }
     
-    private Map<String, Object> buildRequest(String userMessage, 
+    private WebClient buildClient(ModelProviderConfigService.ActiveProviderView provider) {
+        WebClient.Builder builder = WebClient.builder()
+                .baseUrl(ModelProviderConfigService.normalizeLlmApiBaseUrl(provider.apiBaseUrl()));
+        if (provider.apiKey() != null && !provider.apiKey().isBlank()) {
+            builder.defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + provider.apiKey());
+        }
+        return builder.build();
+    }
+
+    private Map<String, Object> buildRequest(String model,
+                                           String userMessage,
                                            String context,
                                            List<Map<String, String>> history) {
         logger.info("构建请求，用户消息：{}，上下文长度：{}，历史消息数：{}", 
@@ -256,6 +255,8 @@ public class DeepSeekClient {
      * @return LLM 响应内容
      */
     public String callSync(String userMessage, String systemPrompt) {
+        ModelProviderConfigService.ActiveProviderView provider =
+                modelProviderConfigService.getActiveProvider(ModelProviderConfigService.SCOPE_LLM);
         List<Map<String, String>> messages = new ArrayList<>();
 
         if (systemPrompt != null && !systemPrompt.isBlank()) {
@@ -264,12 +265,12 @@ public class DeepSeekClient {
         messages.add(Map.of("role", "user", "content", userMessage));
 
         Map<String, Object> request = new java.util.HashMap<>();
-        request.put("model", model);
+        request.put("model", provider.model());
         request.put("messages", messages);
         request.put("stream", false);
 
         try {
-            String response = webClient.post()
+            String response = buildClient(provider).post()
                     .uri("/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(request)
