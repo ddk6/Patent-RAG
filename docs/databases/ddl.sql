@@ -113,6 +113,7 @@ CREATE TABLE patent_documents (
                                   abstract_text LONGTEXT COMMENT '摘要',
                                   main_claim_text LONGTEXT COMMENT '主权利要求文本',
                                   raw_bibliographic_json JSON COMMENT '首页著录项原始结构化 JSON',
+                                  raw_parser_result_json JSON COMMENT '专利解析器完整原始 JSON 结果',
                                   parser_version VARCHAR(32) DEFAULT NULL COMMENT '专利解析器版本',
                                   parse_status VARCHAR(20) NOT NULL DEFAULT 'PENDING' COMMENT '解析状态：PENDING/PROCESSING/COMPLETED/FAILED',
                                   parse_error TEXT COMMENT '解析错误信息',

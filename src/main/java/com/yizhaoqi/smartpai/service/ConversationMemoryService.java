@@ -15,6 +15,7 @@ import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -43,6 +44,18 @@ public class ConversationMemoryService {
     @Autowired
     private UsageQuotaService usageQuotaService;
 
+    @Value("${elasticsearch.host:localhost}")
+    private String esHost;
+
+    @Value("${elasticsearch.port:9200}")
+    private int esPort;
+
+    @Value("${elasticsearch.scheme:http}")
+    private String esScheme;
+
+    @Value("${elasticsearch.username:elastic}")
+    private String esUsername;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private static final Set<String> VALID_MEMORY_TYPES = Set.of(
@@ -70,41 +83,48 @@ public class ConversationMemoryService {
                 logger.info("长期记忆索引已存在: {}", INDEX_NAME);
             }
         } catch (Exception e) {
-            logger.error("初始化长期记忆索引失败: {}", e.getMessage(), e);
+            logger.error("初始化长期记忆索引失败: {}。ES地址={}://{}:{}, username={}。请确认 ES 已启动，并核对 ELASTICSEARCH_SCHEME / ELASTICSEARCH_USERNAME / ELASTICSEARCH_PASSWORD",
+                    e.getMessage(), esScheme, esHost, esPort, maskUsername(esUsername), e);
         }
     }
 
-    private void createIndex() {
-        try {
-            esClient.indices().create(CreateIndexRequest.of(c -> c
-                    .index(INDEX_NAME)
-                    .mappings(m -> m
-                            .properties("memoryId", p -> p.keyword(k -> k))
-                            .properties("userId", p -> p.keyword(k -> k))
-                            .properties("sessionId", p -> p.keyword(k -> k))
-                            .properties("memoryType", p -> p.keyword(k -> k))
-                            .properties("summary", p -> p.text(t -> t.analyzer("ik_max_word")))
-                            .properties("details", p -> p.text(t -> t.analyzer("ik_max_word")))
-                            .properties("entities", p -> p.keyword(k -> k))
-                            .properties("keywords", p -> p.keyword(k -> k))
-                            .properties("importance", p -> p.float_(f -> f))
-                            .properties("confidence", p -> p.float_(f -> f))
-                            .properties("createdAt", p -> p.date(d -> d))
-                            .properties("updatedAt", p -> p.date(d -> d))
-                            .properties("lastUsedAt", p -> p.date(d -> d))
-                            .properties("sourceMessageIds", p -> p.keyword(k -> k))
-                            .properties("isActive", p -> p.boolean_(b -> b))
-                            .properties("ttlDays", p -> p.integer(i -> i))
-                            .properties("summaryEmbedding", p -> p.denseVector(dv -> dv
-                                    .dims(1536)
-                                    .index(true)
-                                    .similarity("cosine")
-                            ))
-                    )
-            ));
-        } catch (Exception e) {
-            logger.error("创建索引失败: {}", e.getMessage(), e);
+    private void createIndex() throws Exception {
+        esClient.indices().create(CreateIndexRequest.of(c -> c
+                .index(INDEX_NAME)
+                .mappings(m -> m
+                        .properties("memoryId", p -> p.keyword(k -> k))
+                        .properties("userId", p -> p.keyword(k -> k))
+                        .properties("sessionId", p -> p.keyword(k -> k))
+                        .properties("memoryType", p -> p.keyword(k -> k))
+                        .properties("summary", p -> p.text(t -> t.analyzer("ik_max_word")))
+                        .properties("details", p -> p.text(t -> t.analyzer("ik_max_word")))
+                        .properties("entities", p -> p.keyword(k -> k))
+                        .properties("keywords", p -> p.keyword(k -> k))
+                        .properties("importance", p -> p.float_(f -> f))
+                        .properties("confidence", p -> p.float_(f -> f))
+                        .properties("createdAt", p -> p.date(d -> d))
+                        .properties("updatedAt", p -> p.date(d -> d))
+                        .properties("lastUsedAt", p -> p.date(d -> d))
+                        .properties("sourceMessageIds", p -> p.keyword(k -> k))
+                        .properties("isActive", p -> p.boolean_(b -> b))
+                        .properties("ttlDays", p -> p.integer(i -> i))
+                        .properties("summaryEmbedding", p -> p.denseVector(dv -> dv
+                                .dims(1536)
+                                .index(true)
+                                .similarity("cosine")
+                        ))
+                )
+        ));
+    }
+
+    private String maskUsername(String rawUsername) {
+        if (rawUsername == null || rawUsername.isBlank()) {
+            return "<empty>";
         }
+        if (rawUsername.length() <= 2) {
+            return rawUsername.charAt(0) + "*";
+        }
+        return rawUsername.charAt(0) + "***" + rawUsername.charAt(rawUsername.length() - 1);
     }
 
     /**

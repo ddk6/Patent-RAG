@@ -44,7 +44,7 @@ public class EsIndexInitializer implements CommandLineRunner {
     @Value("${elasticsearch.port}")
     private int port;
 
-    @Value("${elasticsearch.scheme:https}")
+    @Value("${elasticsearch.scheme:http}")
     private String scheme;
 
     @Value("${elasticsearch.username:elastic}")
