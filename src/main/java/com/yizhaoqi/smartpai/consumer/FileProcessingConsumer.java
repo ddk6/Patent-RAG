@@ -345,11 +345,7 @@ public class FileProcessingConsumer {
     /**
      * 下载文件到临时路径（用于 MinerU）
      */
-    //minerU比Tika解析文件多了一个临时路径的创建
-    //临时路径是为了在MinerU API解析文件时，能够直接上传文件到MinerU服务器
-
-    //这里返回的是什么？
-    //返回的是临时路径的临时文件路径
+    // 临时路径用于将 MinIO/URL 文件转成本地文件，再上传到 MinerU API。
     private Path downloadFileToTemp(String filePath, String fileMd5) throws Exception {
         Path tempFile = Files.createTempFile("mineru_input_", "_" + fileMd5);
 

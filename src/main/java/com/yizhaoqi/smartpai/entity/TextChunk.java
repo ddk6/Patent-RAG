@@ -17,7 +17,7 @@ public class TextChunk {
     // V3 增强字段
     private String sectionPath;  // 层级路径
     private String chunkType;   // text/table/list
-    private boolean isKeyClause; // 是否关键条款
+    private boolean isKeyClause; // 是否专利关键段落
     private int tokenCount;    // token 数
 
     // 构造方法

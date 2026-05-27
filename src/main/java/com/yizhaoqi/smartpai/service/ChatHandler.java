@@ -38,9 +38,11 @@ import java.util.concurrent.RejectedExecutionException;
 public class ChatHandler {
     
     private static final Logger logger = LoggerFactory.getLogger(ChatHandler.class);
-    private static final int MAX_CONTEXT_SNIPPET_LEN = 300;
-    private static final int MAX_MATCHED_CHUNK_LEN = 800;
+    private static final int MAX_CONTEXT_SNIPPET_LEN = 1200;
+    private static final int MAX_CLAIM_CONTEXT_SNIPPET_LEN = 3200;
+    private static final int MAX_MATCHED_CHUNK_LEN = 1200;
     private static final int MAX_EVIDENCE_SNIPPET_LEN = 160;
+    private static final long RESPONSE_TIMEOUT_MS = 180_000L;
     private static final int MAX_CONVERSATION_ROUNDS = 5;  // 最多保留5轮对话（10条消息）
     private static final int MAX_MESSAGES = MAX_CONVERSATION_ROUNDS * 2;  // 10条消息
     private final RedisTemplate<String, String> redisTemplate;
@@ -134,12 +136,21 @@ public class ChatHandler {
                     sendCompletionNotification(session);
                     responseFuture.completeExceptionally(error);
                     // 清理会话响应构建器
-                    responseBuilders.remove(session.getId());
-                    responseFutures.remove(session.getId());
+                    cleanupSessionState(session.getId(), error);
+                },
+                () -> {
+                    StringBuilder responseBuilder = responseBuilders.get(session.getId());
+                    if (responseBuilder == null) {
+                        RuntimeException exception = new RuntimeException("响应构建器为空");
+                        handleError(session, exception);
+                        cleanupSessionState(session.getId(), exception);
+                        return;
+                    }
+                    finalizeResponse(userId, userMessage, conversationId, session, responseFuture, responseBuilder);
                 });
 
-            // 6. 后台任务检查并标记响应完成
-            submitCompletionMonitor(userId, userMessage, conversationId, session, responseFuture);
+            // 6. 后台超时兜底。正常情况下由 LLM stream 的 onComplete 触发保存。
+            submitResponseTimeoutMonitor(userId, userMessage, conversationId, session, responseFuture);
             
         } catch (RateLimitExceededException e) {
             sendRateLimitMessage(session, e);
@@ -151,43 +162,26 @@ public class ChatHandler {
         }
     }
 
-    private void submitCompletionMonitor(String userId, String userMessage, String conversationId, WebSocketSession session,
-                                         CompletableFuture<String> responseFuture) {
+    private void submitResponseTimeoutMonitor(String userId, String userMessage, String conversationId, WebSocketSession session,
+                                              CompletableFuture<String> responseFuture) {
         try {
             chatMonitorExecutor.execute(() -> {
                 try {
-                    Thread.sleep(3000);
+                    Thread.sleep(RESPONSE_TIMEOUT_MS);
+                    if (responseFuture.isDone()) {
+                        return;
+                    }
                     StringBuilder responseBuilder = responseBuilders.get(session.getId());
-                    if (responseBuilder == null) {
-                        RuntimeException exception = new RuntimeException("响应构建器为空");
-                        responseFuture.completeExceptionally(exception);
+                    if (responseBuilder != null && responseBuilder.length() > 0) {
+                        logger.warn("LLM 流式响应未收到完成事件，按超时兜底保存: sessionId={}", session.getId());
+                        finalizeResponse(userId, userMessage, conversationId, session, responseFuture, responseBuilder);
+                    } else {
+                        RuntimeException exception = new RuntimeException("LLM 响应超时且未收到有效内容");
                         handleError(session, exception);
                         cleanupSessionState(session.getId(), exception);
-                        return;
-                    }
-
-                    int lastLength = responseBuilder.length();
-                    Thread.sleep(2000);
-                    if (responseBuilder.length() == lastLength) {
-                        finalizeResponse(userId, userMessage, conversationId, session, responseFuture, responseBuilder);
-                        return;
-                    }
-
-                    for (int i = 0; i < 5; i++) {
-                        Thread.sleep(5000);
-                        lastLength = responseBuilder.length();
-                        Thread.sleep(2000);
-                        if (responseBuilder.length() == lastLength) {
-                            finalizeResponse(userId, userMessage, conversationId, session, responseFuture, responseBuilder);
-                            return;
-                        }
-                    }
-
-                    if (!responseFuture.isDone()) {
-                        finalizeResponse(userId, userMessage, conversationId, session, responseFuture, responseBuilder);
                     }
                 } catch (Exception e) {
-                    logger.error("检查响应完成时出错: {}", e.getMessage(), e);
+                    logger.error("检查响应超时时出错: {}", e.getMessage(), e);
                     responseFuture.completeExceptionally(e);
                     cleanupSessionState(session.getId(), e);
                 }
@@ -202,6 +196,16 @@ public class ChatHandler {
     private void finalizeResponse(String userId, String userMessage, String conversationId, WebSocketSession session,
                                   CompletableFuture<String> responseFuture, StringBuilder responseBuilder) {
         String completeResponse = responseBuilder.toString();
+        if (responseFuture.isDone()) {
+            return;
+        }
+        if (completeResponse.isBlank()) {
+            RuntimeException exception = new RuntimeException("LLM 响应为空，跳过保存空助手消息");
+            responseFuture.completeExceptionally(exception);
+            handleError(session, exception);
+            cleanupSessionState(session.getId(), exception);
+            return;
+        }
         responseFuture.complete(completeResponse);
         sendCompletionNotification(session);
         updateConversationHistory(conversationId, userId, userMessage, completeResponse, sessionReferenceMappings.get(session.getId()));
@@ -425,7 +429,11 @@ public class ChatHandler {
         try {
             PatentSearchRequest request = new PatentSearchRequest();
             request.setQuery(userMessage);
-            request.setTopK(5);
+            if (isClaimEvidenceQuestion(userMessage)) {
+                request.setTopK(20);
+            } else {
+                request.setTopK(8);
+            }
             List<PatentSearchResult> patentResults = patentSearchService.search(request, userId);
             if (patentResults != null && !patentResults.isEmpty()) {
                 logger.info("[ChatRAG] 命中专利检索链路: userId={}, count={}", userId, patentResults.size());
@@ -462,6 +470,7 @@ public class ChatHandler {
 
     private String buildPatentContextText(PatentSearchResult result) {
         StringBuilder builder = new StringBuilder("【专利检索】");
+        appendPatentField(builder, "文件", result.getFileName());
         appendPatentField(builder, "题名", result.getTitle());
         appendPatentField(builder, "公开号", result.getPublicationNo());
         appendPatentField(builder, "申请号", result.getApplicationNo());
@@ -500,6 +509,9 @@ public class ChatHandler {
     }
 
     private String buildPatentFileLabel(PatentSearchResult result) {
+        if (result.getFileName() != null && !result.getFileName().isBlank()) {
+            return result.getFileName();
+        }
         if (result.getPublicationNo() != null && !result.getPublicationNo().isBlank()) {
             return result.getPublicationNo();
         }
@@ -516,6 +528,26 @@ public class ChatHandler {
         return retrievalMode != null && !retrievalMode.isBlank() ? retrievalMode : "HYBRID";
     }
 
+    private boolean isClaimEvidenceQuestion(String userMessage) {
+        if (userMessage == null) {
+            return false;
+        }
+        String normalized = userMessage.toLowerCase();
+        return userMessage.contains("权利要求")
+                || userMessage.contains("权要")
+                || normalized.contains("claim");
+    }
+
+    private boolean isIndependentClaimQuestion(String userMessage) {
+        if (userMessage == null) {
+            return false;
+        }
+        String normalized = userMessage.toLowerCase();
+        return userMessage.contains("独立权利要求")
+                || userMessage.contains("独权")
+                || normalized.contains("independent claim");
+    }
+
     private String buildContext(List<SearchResult> searchResults, String sessionId, String userMessage) {
         if (searchResults == null || searchResults.isEmpty()) {
             // 返回空字符串，让 LLM provider 按"无检索结果"逻辑处理
@@ -528,10 +560,7 @@ public class ChatHandler {
         StringBuilder context = new StringBuilder();
         for (int i = 0; i < searchResults.size(); i++) {
             SearchResult result = searchResults.get(i);
-            String snippet = result.getTextContent();
-            if (snippet.length() > MAX_CONTEXT_SNIPPET_LEN) {
-                snippet = snippet.substring(0, MAX_CONTEXT_SNIPPET_LEN) + "…";
-            }
+            String snippet = selectContextSnippet(result, userMessage);
             String fileLabel = result.getFileName() != null ? result.getFileName() : "unknown";
             String fileMd5 = result.getFileMd5();
 
@@ -559,6 +588,56 @@ public class ChatHandler {
         logger.info("保存会话 {} 的引用映射，共 {} 条: {}", sessionId, referenceMapping.size(), referenceMapping);
 
         return context.toString();
+    }
+
+    private String selectContextSnippet(SearchResult result, String userMessage) {
+        String text = result.getTextContent() != null ? result.getTextContent() : "";
+        if (text.length() <= MAX_CONTEXT_SNIPPET_LEN) {
+            return text;
+        }
+
+        if (isClaimEvidenceQuestion(userMessage) || isPatentScopeQuestion(userMessage)) {
+            int anchor = firstPositiveIndex(
+                    text.indexOf("来源: 权利要求"),
+                    text.indexOf("来源: 独立权利要求"),
+                    text.indexOf("权利要求书"),
+                    text.indexOf("权利要求1"),
+                    text.indexOf("权利要求 1"),
+                    text.indexOf("1. 一种"),
+                    text.indexOf("1 . 一种"),
+                    text.indexOf("1、 一种"),
+                    text.indexOf("一种具有")
+            );
+            if (anchor >= 0) {
+                int start = Math.max(0, anchor - 120);
+                int end = Math.min(text.length(), start + MAX_CLAIM_CONTEXT_SNIPPET_LEN);
+                return (start > 0 ? "…" : "") + text.substring(start, end) + (end < text.length() ? "…" : "");
+            }
+        }
+
+        return text.substring(0, MAX_CONTEXT_SNIPPET_LEN) + "…";
+    }
+
+    private int firstPositiveIndex(int... indexes) {
+        int result = -1;
+        for (int index : indexes) {
+            if (index >= 0 && (result < 0 || index < result)) {
+                result = index;
+            }
+        }
+        return result;
+    }
+
+    private boolean isPatentScopeQuestion(String userMessage) {
+        if (userMessage == null) {
+            return false;
+        }
+        return userMessage.contains("保护范围")
+                || userMessage.contains("落入")
+                || userMessage.contains("侵权")
+                || userMessage.contains("技术特征")
+                || userMessage.contains("审查员")
+                || userMessage.contains("比对");
     }
 
     /**

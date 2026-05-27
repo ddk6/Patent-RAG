@@ -13,7 +13,7 @@ import org.springframework.stereotype.Component;
 @Data
 public class MinerUProperties {
 
-    /** 是否启用 MinerU 解析 (false 则使用原有 Tika 解析) */
+    /** 是否启用 MinerU 专利兜底解析 */
     private boolean enabled = false;
 
     /** API Base URL */

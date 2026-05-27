@@ -401,15 +401,16 @@ public class MinerUService {
 
     // ==================== V3 语义感知切分 ====================
 
-    /** 关键条款关键词 */
+    /** 专利关键段落关键词 */
     private static final List<String> KEY_CLAUSE_KEYWORDS = Arrays.asList(
-            "保险责任", "责任免除", "费率", "赔付", "赔偿", "免责", "承保范围"
+            "权利要求", "权利要求书", "独立权利要求", "从属权利要求",
+            "说明书摘要", "技术领域", "背景技术", "发明内容", "具体实施方式", "实施例"
     );
 
     /** 普通 section 最大 token 数 */
     private static final int MAX_TOKEN_NORMAL = 1024;
 
-    /** 关键条款最大 token 数 */
+    /** 专利关键段落最大 token 数 */
     private static final int MAX_TOKEN_KEY_CLAUSE = 1536;
 
     /** 表格最大 token 数 */
@@ -1333,7 +1334,7 @@ public class MinerUService {
     }
 
     /**
-     * 根据标题判断是否关键条款
+     * 根据标题判断是否专利关键段落
      */
     private boolean isKeyClauseTitle(String title) {
         if (title == null) return false;
@@ -1346,7 +1347,7 @@ public class MinerUService {
     }
 
     /**
-     * 根据文本内容判断是否关键条款
+     * 根据文本内容判断是否专利关键段落
      */
     private boolean isKeyClauseText(String text) {
         if (text == null) return false;
@@ -1356,7 +1357,7 @@ public class MinerUService {
                 matchCount++;
             }
         }
-        // 文本中出现多个关键词才认为是关键条款
+        // 文本中出现多个关键词才认为是专利关键段落
         return matchCount >= 2;
     }
 
