@@ -9,6 +9,7 @@
 KnowLink 是一款面向企业的 AI 知识库管理系统，基于 RAG（Retrieval-Augmented Generation）技术栈构建，提供**智能文档处理**与**语义检索**能力。其核心价值在于：将非结构化文档转化为可检索的知识资产，配合大语言模型实现精准问答。
 
 目标用户场景：
+- 专利 PDF 的结构化解析、权利要求检索与技术特征比对
 - 企业内部知识库（制度、文档、FAQ）
 - 产品技术支持文档检索
 - 私有化部署的多租户场景
@@ -31,8 +32,8 @@ KnowLink 是一款面向企业的 AI 知识库管理系统，基于 RAG（Retrie
 │        │                     │              │
 │  ┌─────▼─────────────────────▼───────────┐  │
 │  │           Service Layer               │  │
-│  │  ChatService / DocumentService         │  │
-│  │  HybridSearchService / QueryRewrite    │  │
+│  │  ChatHandler / DocumentService         │  │
+│  │  PatentSearchService / Patent RAG      │  │
 │  └─────┬─────────────────────┬───────────┘  │
 │        │                     │              │
 │  ┌─────▼─────────┐  ┌────────▼────────────┐  │
@@ -45,13 +46,15 @@ KnowLink 是一款面向企业的 AI 知识库管理系统，基于 RAG（Retrie
 │         Kafka Consumer (Async)               │
 │  FileProcessingConsumer                       │
 │        │                                      │
-│        ├──► MinerU API (Markdown解析)          │
+│        ├──► Patent Direct Parser              │
 │        │        │                             │
-│        │   Apache Tika (降级fallback)          │
+│        ├──► MinerU API (专利兜底解析)           │
 │        │        │                             │
-│        ├──► VectorizationService (Embedding)  │
+│        ├──► PatentIngestionService            │
 │        │        │                             │
-│        └──► ElasticsearchService (Index)     │
+│        ├──► PatentVectorizationService        │
+│        │        │                             │
+│        └──► ElasticsearchService (patent_chunks)│
 └──────────────────────────────────────────────┘
 
 ┌──────────┐  ┌──────────┐  ┌────────────┐  ┌─────────┐
@@ -71,7 +74,7 @@ KnowLink 是一款面向企业的 AI 知识库管理系统，基于 RAG（Retrie
 | **全文检索** | Elasticsearch 8.10 | Meilisearch / Qdrant | 向量+全文混合搜索成熟方案 |
 | **向量引擎** | ES KNN | Qdrant / Milvus / Pinecone | 复用 ES，统一架构 |
 | **消息队列** | Apache Kafka 3.2 | RabbitMQ / ActiveMQ | 高吞吐、分区有序、消费者组 |
-| **文档解析** | MinerU API | LangChain Loader | Markdown 输出质量高、结构保留好 |
+| **文档解析** | 专利直提服务 + MinerU API | LangChain Loader | 专利字段可结构化抽取，MinerU 作为版面解析兜底 |
 | **AI 模型** | DeepSeek Chat | OpenAI GPT / 阿里通义 | 性价比高、国内合规 |
 | **向量化** | DashScope Embedding | OpenAI Embedding | 国内可用、中文优化 |
 | **文件存储** | MinIO (S3 兼容) | 阿里云 OSS | 私有化部署友好 |
@@ -81,7 +84,7 @@ KnowLink 是一款面向企业的 AI 知识库管理系统，基于 RAG（Retrie
 
 ## 四、核心流程深度分析
 
-### 4.1 文档上传与异步处理
+### 4.1 专利文档上传与异步处理
 
 ```
 ┌─────────────┐    ┌──────────┐    ┌────────────┐
@@ -89,31 +92,36 @@ KnowLink 是一款面向企业的 AI 知识库管理系统，基于 RAG（Retrie
 │  上传 API   │    │  合并    │    │  异步触发  │
 └─────────────┘    └──────────┘    └─────┬──────┘
                                          │
-                         ┌───────────────┴───────────────┐
-                         ▼                               ▼
-                  ┌──────────────┐              ┌───────────────┐
-                  │   MinerU     │              │ Apache Tika  │
-                  │  (主路径)     │              │  (降级路径)   │
-                  └──────┬───────┘              └───────┬───────┘
-                         │                              │
-                         ▼                              ▼
-                  ┌──────────────────────────────────┐
-                  │         ParseService              │
-                  │    MinerU JSON → Markdown        │
-                  │    Tika Output → 纯文本           │
-                  └──────────────┬───────────────────┘
+                                         ▼
+                  ┌───────────────────────────────┐
+                  │ FileProcessingConsumer         │
+                  │ 专利直提优先，MinerU 兜底       │
+                  └──────────────┬────────────────┘
                                  │
+              ┌──────────────────┴──────────────────┐
+              ▼                                     ▼
+    ┌──────────────────────┐              ┌──────────────────────┐
+    │ PatentParserClient   │              │ MinerUService         │
+    │ DIRECT_PDF 直提       │              │ fullMd/content/layout │
+    └──────────┬───────────┘              └──────────┬───────────┘
+               │                                     │
+               └──────────────┬──────────────────────┘
+                              ▼
+                  ┌──────────────────────────────────┐
+                  │ PatentIngestionService           │
+                  │ patent_documents / claims /      │
+                  │ sections / chunks                │
+                  └──────────────┬───────────────────┘
                                  ▼
                   ┌──────────────────────────────────┐
-                  │       VectorizationService        │
-                  │    DashScope Embedding           │
-                  │    text-embedding-v4             │
+                  │ PatentVectorizationService       │
+                  │ DashScope text-embedding-v4      │
+                  │ 超长 chunk 二次切分保护           │
                   └──────────────┬───────────────────┘
-                                 │
                                  ▼
                   ┌──────────────────────────────────┐
-                  │      ElasticsearchService         │
-                  │       knowledge_base index        │
+                  │ Elasticsearch patent_chunks       │
+                  │ 权利要求 + 说明书 + 元数据检索      │
                   └──────────────────────────────────┘
 ```
 
@@ -122,41 +130,40 @@ KnowLink 是一款面向企业的 AI 知识库管理系统，基于 RAG（Retrie
 - **分片上传**：前端按 5MB 分片，后端通过 MD5 标识文件，合并时用 MinIO multipart API
 - **Redis Bitmap**：追踪每个分片的完成状态，避免重复上传
 - **MySQL chunk_info**：持久化分片元数据，重启后可恢复上传状态
-- **Kafka 幂等性**：通过文件状态机（Merging → Parsing → Vectorizing → Done）+ 乐观锁 + DB 唯一约束三重保障
-- **补偿任务**：定时扫描 `parse_status = MERGING` 的记录，处理 Kafka 投递失败或 Consumer 崩溃
+- **专利直提快路径**：先用 `DIRECT_PDF` 调专利解析服务，质量不足时回退 MinerU。
+- **结构化入库**：专利元数据、权利要求、说明书章节和检索块分别写入 `patent_documents`、`patent_claims`、`patent_sections`、`patent_chunks`。
+- **向量化保护**：专利 chunk 向量化前会清洗控制字符，并将超长 chunk 二次切分，避免 DashScope 单条 input 过长导致 HTTP 400。
+- **Kafka 幂等性**：通过文件状态机（MERGING → PATENT_STRUCTURING → PATENT_VECTORIZING → COMPLETED / FAILED）保障重复消息可跳过。
+- **补偿任务**：专利重试/补偿逻辑可重新投递 Kafka 任务，已入库但 ES 字段变更时需要重新索引。
 
-### 4.2 对话搜索流程
+### 4.2 专利问答检索流程
 
 ```
 用户 Query
     │
     ▼
-QueryRewriteService
-    ├── 全角转半角（ASCII normalization）
-    ├── WWW 过滤（移除无意义字符）
-    └── 同义词扩展（synonym.txt 词典）
-    │
-    ▼
 ┌─────────────────────────────────────┐
-│        HybridSearchService          │
+│        PatentSearchService          │
+│                                     │
+│  ┌──────────────┐ ┌──────────────┐ │
+│  │ Claim-aware  │ │ Metadata      │ │
+│  │ query route  │ │ filters       │ │
+│  └──────┬───────┘ └──────┬───────┘ │
+│         │                │          │
+│         ▼                ▼          │
+│  sourceType=CLAIM  applicationNo    │
+│  independentClaim  publicationNo    │
+│                    fileName/title   │
 │                                     │
 │  ┌──────────┐     ┌─────────────┐  │
 │  │ ES KNN   │     │ ES BM25     │  │
 │  │ 向量召回  │     │ 关键词召回  │  │
-│  │ top=100  │     │ top=100     │  │
 │  └────┬─────┘     └──────┬──────┘  │
-│       │                   │          │
-│       └───────┬───────────┘          │
+│       └───────┬──────────┘          │
 │               ▼                     │
-│         RRF 融合                    │
-│    score = 1/(k+rank)               │
-│               │                     │
+│           RRF-like 融合             │
 │               ▼                     │
-│      Cross-Encoder Rerank           │
-│      qwen3-rerank (top=20)          │
-│               │                     │
-│               ▼                     │
-│          Top-5 返回                  │
+│          Top-K 证据片段              │
 └─────────────────────────────────────┘
     │
     ▼
@@ -168,10 +175,10 @@ WebSocket → 前端流式展示
 
 **关键技术点**：
 
-- **RRF (Reciprocal Rank Fusion)**：K=60 平滑因子，使两种召回方式互补，不偏向任一方法
-- **Cross-Encoder 重排**：比向量相似度更精准的相关性评估，但计算量大，所以仅对 RRF 融合后的 Top-20 重排
-- **Query Rewrite**：规则驱动（同义词、全角转换），无需模型推理，延迟低
-- **Rerank 降级**：Rerank API 失败时直接返回 RRF 结果，保障服务可用性
+- **Claim-aware 路由**：问题中出现“权利要求 / 独立权利要求 / claim”时，聊天链路自动优先检索 `sourceType=CLAIM`；独立权利要求问题自动追加 `independentClaim=true`。
+- **文件名与申请号召回**：`PatentSearchService` 会解析 `201610481598X.pdf`、`201610481598.X`、`CN...` 等候选标识，并在 BM25/元数据查询中增强相关性。
+- **KNN 不依赖 BM25 命中**：关键词无结果时仍保留向量召回，避免语义命中被 BM25 空结果提前截断。
+- **可复核证据**：返回上下文包含文件名、题名、公开号、申请号、来源类型、权利要求编号、页码/锚点与原文片段，便于回答中引用。
 
 ### 4.3 聊天会话存储
 
@@ -194,7 +201,11 @@ Redis Key: conversation:{conversationId}
 redisTemplate.opsForList().range()      ← 必须用 List 类型读取
 ```
 
-**注意**：Redis Key 类型为 List，写用 `rightPush`，读必须用 `range`，不能用 `get`。此前曾因混用 `opsForValue().get()` 导致 WRONGTYPE 错误。
+**注意**：
+
+- Redis Key 类型为 List，写用 `rightPush`，读必须用 `range`，不能用 `get`。此前曾因混用 `opsForValue().get()` 导致 WRONGTYPE 错误。
+- 流式回答必须由 LLM stream 的 `onComplete` 事件触发保存，不能用“几秒内内容未增长”猜测完成；否则模型短暂停顿时可能把空回复或半截回复写入 Redis，刷新后出现空的 KnowLink 气泡。
+- 空白 assistant 响应不会写入历史，会返回错误提示并清理当前 session 状态。
 
 ---
 
@@ -214,10 +225,34 @@ Document (文档)
   ├── fileMd5 (唯一索引)
   ├── fileName
   ├── fileSize
-  ├── parseStatus (MERGING / PARSING / VECTORIZING / DONE / FAILED)
-  ├── chunkCount
+  ├── parseStatus (MERGING / PATENT_STRUCTURING / PATENT_VECTORIZING / COMPLETED / FAILED)
+  ├── estimatedChunkCount / actualChunkCount
   ├── orgTag
   └── isPublic
+
+PatentDocument (专利结构化文档)
+  ├── id (Long, PK)
+  ├── uploadId / fileMd5 / fileName
+  ├── applicationNo / publicationNo / title
+  ├── applicant / inventor / ipcClassification
+  ├── abstractText / mainClaimText
+  ├── rawBibliographicJson / rawParserResultJson
+  └── parseStatus / parserVersion
+
+PatentClaim (权利要求)
+  ├── patentId
+  ├── claimNo
+  ├── textContent
+  ├── independent
+  └── dependsOnClaimNo
+
+PatentChunk (专利检索块)
+  ├── patentId
+  ├── chunkNo
+  ├── sourceType (CLAIM / DESCRIPTION / ABSTRACT / BIBLIOGRAPHIC)
+  ├── claimNo / sectionPath / pageNumber
+  ├── textContent
+  └── modelVersion
 
 ChunkInfo (分片信息)
   ├── id (Long, PK)
@@ -229,20 +264,30 @@ ChunkInfo (分片信息)
 
 ### 5.2 Elasticsearch Index Mapping
 
+当前专利检索主索引为 `patent_chunks`：
+
 ```json
 {
   "mappings": {
     "properties": {
-      "content": { "type": "text", "analyzer": "ik_max_word" },
-      "content_vector": { "type": "dense_vector",
-        "dims": 1536,
+      "textContent": { "type": "text", "analyzer": "ik_max_word" },
+      "vector": { "type": "dense_vector",
+        "dims": 2048,
         "index": true,
         "similarity": "cosine" },
       "fileMd5": { "type": "keyword" },
-      "fileName": { "type": "text" },
+      "fileName": {
+        "type": "text",
+        "fields": { "keyword": { "type": "keyword" } }
+      },
+      "sourceType": { "type": "keyword" },
+      "claimNo": { "type": "integer" },
+      "independentClaim": { "type": "boolean" },
+      "publicationNo": { "type": "keyword" },
+      "applicationNo": { "type": "keyword" },
+      "title": { "type": "text", "analyzer": "ik_max_word" },
       "orgTag": { "type": "keyword" },
-      "isPublic": { "type": "boolean" },
-      "chunkIndex": { "type": "integer" }
+      "isPublic": { "type": "boolean" }
     }
   }
 }
@@ -316,7 +361,7 @@ frontend/
 
 | 问题 | 描述 | 影响 |
 |------|------|------|
-| **Rerank API 无缓存** | 相同 query 的 Rerank 结果无缓存 | API 成本 |
+| **专利证据重排仍偏规则化** | 当前主要依赖 KNN/BM25 融合与字段过滤，尚未加入面向权利要求证据的专用重排 | 复杂问题排序稳定性 |
 | **会话无 TTL** | Redis 会话 Key 永不过期 | 内存持续增长 |
 | **无链路追踪** | 日志分散，定位问题困难 | 运维成本 |
 | **跨组织搜索无隔离测试** | 单元测试覆盖不足 | 安全风险 |
@@ -336,8 +381,8 @@ frontend/
 | 维度 | KnowLink | Dify | FastGPT |
 |------|---------|------|---------|
 | **多租户** | OrgTag + JWT | 团队/工作组 | 命名空间隔离 |
-| **文档解析** | MinerU + Tika 降级 | CSV/JSON 为主 | JSON/TXT |
-| **Rerank** | Cross-Encoder | 无 | 无 |
+| **文档解析** | 专利直提 + MinerU 兜底 | CSV/JSON 为主 | JSON/TXT |
+| **检索证据** | Claim-aware + KNN/BM25 | 通用知识块 | 通用知识块 |
 | **架构复杂度** | 中（Kafka 异步） | 低（同步处理） | 中 |
 | **私有化友好度** | 高（全部自托管） | 高 | 高 |
 | **前端定制化** | Vue3 自研 | React 自研 | React 自研 |
@@ -373,6 +418,16 @@ MinIO 8.5         → 19000 (API) / 19001 (Console)
 | `elasticsearch.scheme` | 本地默认 http | 生产使用 https |
 | `kafka.consumer.group-id` | 消费者组 ID | 多实例部署时必填 |
 | `rerank.enabled` | Rerank 功能开关 | 降级备用 |
+| `embedding.api.batch-size` | DashScope Embedding 单次请求行数 | `text-embedding-v4` 建议不超过 10 |
+| `embedding.api.dimension` | ES dense_vector 维度 | 必须与 `patent_chunks.vector.dims` 一致 |
+| `patent.parser.direct-enabled` | 专利直提快路径开关 | 质量不足时回退 MinerU |
+| `patent.parser.direct-quality-threshold` | 专利直提质量门禁 | 生产按样本集调参 |
+
+### 10.4 索引变更与重建
+
+- `patent_chunks` mapping 增加字段（例如 `fileName`）后，已存在 ES 文档不会自动补字段。
+- 需要重新触发专利重试/补偿任务，或清理并重建相关专利的 ES 索引。
+- 如果仅重启后端，新的代码会生效，但旧 ES 文档仍保持原有字段集合。
 
 ---
 
@@ -383,9 +438,13 @@ MinIO 8.5         → 19000 (API) / 19001 (Console)
 | `src/main/java/.../SmartPaiApplication.java` | 应用启动入口 |
 | `src/main/java/.../consumer/FileProcessingConsumer.java` | Kafka 异步文档处理 |
 | `src/main/java/.../service/ChatHandler.java` | WebSocket 聊天处理器 |
-| `src/main/java/.../service/HybridSearchService.java` | RRF + Rerank 搜索服务 |
-| `src/main/java/.../service/QueryRewriteService.java` | 查询改写服务 |
+| `src/main/java/.../service/LlmProviderRouter.java` | 活动 LLM Provider 路由与流式完成回调 |
+| `src/main/java/.../service/patent/PatentSearchService.java` | 专利 KNN/BM25/权利要求检索服务 |
+| `src/main/java/.../service/patent/PatentVectorizationService.java` | 专利 chunk 向量化与 ES 写入 |
+| `src/main/java/.../service/patent/PatentIngestionService.java` | 专利结构化入库 |
+| `src/main/java/.../service/patent/PatentParserClient.java` | 专利解析服务客户端 |
 | `src/main/java/.../controller/ConversationController.java` | 对话历史 REST API |
 | `src/main/java/.../controller/AdminController.java` | 管理员面板 API |
+| `src/main/resources/es-mappings/patent_chunks.json` | 专利 ES 索引 mapping |
 | `frontend/src/handler/websocket/index.ts` | WebSocket 前端客户端 |
 | `docs/docker-compose.yaml` | 基础设施编排 |
