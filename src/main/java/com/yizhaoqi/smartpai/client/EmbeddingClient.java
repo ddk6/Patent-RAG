@@ -9,10 +9,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
+import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
 
 import jakarta.annotation.PostConstruct;
@@ -101,6 +103,12 @@ public class EmbeddingClient {
             }
             logger.info("成功生成向量，总数量: {}", all.size());
             return new EmbeddingUsageResult(all, totalTokens, currentModelVersion());
+        } catch (NonRetryableEmbeddingException e) {
+            logger.error("API调用失败 - 状态码: {}, 响应: {}", e.statusCode, e.responseBody);
+            throw new RuntimeException(String.format(
+                    "向量生成失败 - API错误: HTTP %d - %s",
+                    e.statusCode,
+                    e.responseBody), e);
         } catch (WebClientResponseException e) {
             // 提供详细的API响应错误信息
             logger.error("API调用失败 - 状态码: {}, 响应: {}, 请求头: {}",
@@ -129,20 +137,38 @@ public class EmbeddingClient {
         }
         requestBody.put("encoding_format", "float");
 
-        logger.debug("发送嵌入请求 - Provider: {}, 模型: {}, 维度: {}, 批次大小: {}, 文本预览: {}",
-                provider.provider(), provider.model(), provider.dimension(), batch.size(),
+        int maxChars = batch.stream().mapToInt(text -> text != null ? text.length() : 0).max().orElse(0);
+        int estimatedTokens = usageQuotaService.estimateEmbeddingTokens(batch);
+        logger.debug("发送嵌入请求 - Provider: {}, 模型: {}, 维度: {}, 批次大小: {}, maxChars: {}, estimatedTokens: {}, 文本预览: {}",
+                provider.provider(), provider.model(), provider.dimension(), batch.size(), maxChars, estimatedTokens,
                 batch.isEmpty() ? "空" : batch.get(0).substring(0, Math.min(50, batch.get(0).length())) + "...");
 
         return buildClient(provider).post()
                 .uri("/embeddings")
                 .bodyValue(requestBody)
                 .retrieve()
+                .onStatus(status -> status.is4xxClientError() && status.value() != 429, response ->
+                        response.bodyToMono(String.class)
+                                .defaultIfEmpty("")
+                                .flatMap(body -> Mono.error(new NonRetryableEmbeddingException(
+                                        response.statusCode().value(), body))))
                 .bodyToMono(String.class)
                 .retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1))
-                        .filter(e -> e instanceof WebClientResponseException)
+                        .filter(this::isRetryableEmbeddingError)
                         .doBeforeRetry(signal -> logger.warn("重试API调用 - 尝试: {}, 错误: {}",
                                 signal.totalRetries() + 1, signal.failure().getMessage())))
                 .block(Duration.ofSeconds(30));
+    }
+
+    private boolean isRetryableEmbeddingError(Throwable error) {
+        if (error instanceof NonRetryableEmbeddingException) {
+            return false;
+        }
+        if (error instanceof WebClientResponseException responseException) {
+            int status = responseException.getStatusCode().value();
+            return status == 429 || responseException.getStatusCode().is5xxServerError();
+        }
+        return true;
     }
 
     private WebClient buildClient(ModelProviderConfigService.ActiveProviderView provider) {
@@ -190,5 +216,16 @@ public class EmbeddingClient {
     }
 
     public record EmbeddingUsageResult(List<float[]> vectors, int totalTokens, String modelVersion) {
+    }
+
+    private static class NonRetryableEmbeddingException extends RuntimeException {
+        private final int statusCode;
+        private final String responseBody;
+
+        private NonRetryableEmbeddingException(int statusCode, String responseBody) {
+            super("Non-retryable embedding API error: HTTP " + statusCode + " - " + responseBody);
+            this.statusCode = statusCode;
+            this.responseBody = responseBody;
+        }
     }
 }

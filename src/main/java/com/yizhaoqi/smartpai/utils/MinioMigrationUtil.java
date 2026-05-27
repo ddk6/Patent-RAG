@@ -166,19 +166,19 @@ public class MinioMigrationUtil {
         logger.warn("========================================");
 
         try {
-            // 1. 清空 ElasticSearch
-            logger.info("清空 ElasticSearch 索引...");
+            // 1. 清空专利 ElasticSearch 索引
+            logger.info("清空 ElasticSearch 专利索引...");
             DeleteByQueryRequest deleteRequest = DeleteByQueryRequest.of(d -> d
-                .index("knowledge_base")
+                .index("patent_chunks")
                 .query(Query.of(q -> q.matchAll(m -> m)))
             );
             esClient.deleteByQuery(deleteRequest);
-            logger.info("✅ ElasticSearch 已清空");
+            logger.info("ElasticSearch 专利索引已清空");
 
             // 2. 清空 MySQL 表
             logger.info("清空 MySQL 表...");
             fileUploadRepository.deleteAll();
-            logger.info("✅ MySQL 表已清空");
+            logger.info("MySQL 表已清空");
 
             // 3. 清空 MinIO merged 目录
             logger.info("清空 MinIO merged 目录...");

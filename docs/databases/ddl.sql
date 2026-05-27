@@ -36,7 +36,7 @@ CREATE TABLE file_upload (
                              estimated_chunk_count INT DEFAULT NULL COMMENT '预估切片数',
                              actual_embedding_tokens BIGINT DEFAULT NULL COMMENT '实际 embedding token 数',
                              actual_chunk_count INT DEFAULT NULL COMMENT '实际切片数',
-                             document_type VARCHAR(32) NOT NULL DEFAULT 'GENERAL' COMMENT '文档类型：GENERAL通用文档 PATENT专利文档',
+                             document_type VARCHAR(32) NOT NULL DEFAULT 'PATENT' COMMENT '文档类型：PATENT专利文档 GENERAL历史通用文档',
                              parse_method VARCHAR(20) DEFAULT NULL COMMENT '解析方法：TIKA/MINERU/PATENT/PATENT_DIRECT',
                              parse_status VARCHAR(20) DEFAULT NULL COMMENT '解析状态：PENDING/PROCESSING/COMPLETED/FAILED',
                              parsed_at TIMESTAMP NULL DEFAULT NULL COMMENT '解析完成时间',
@@ -57,24 +57,6 @@ CREATE TABLE chunk_info (
                             storage_path VARCHAR(255) NOT NULL COMMENT '分块在存储系统中的路径',
                             UNIQUE KEY uk_file_md5_chunk_index (file_md5, chunk_index)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件分块信息表';
-
-CREATE TABLE document_vectors (
-                                  vector_id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '向量记录唯一标识',
-                                  file_md5 VARCHAR(32) NOT NULL COMMENT '关联的文件MD5值',
-                                  chunk_id INT NOT NULL COMMENT '文本分块序号',
-                                  text_content TEXT COMMENT '文本内容',
-                                  page_number INT COMMENT 'PDF页码，用于引用定位',
-                                  anchor_text VARCHAR(255) COMMENT '页内定位锚点文本',
-                                  model_version VARCHAR(32) COMMENT '向量模型版本',
-                                  user_id VARCHAR(64) NOT NULL COMMENT '上传用户ID',
-                                  org_tag VARCHAR(50) COMMENT '文件所属组织标签',
-                                  is_public BOOLEAN NOT NULL DEFAULT FALSE COMMENT '文件是否公开',
-                                  section_path VARCHAR(500) COMMENT '层级路径',
-                                  chunk_type VARCHAR(50) COMMENT '分块类型',
-                                  is_key_clause BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否关键条款',
-                                  token_count INT COMMENT 'token 数',
-                                  UNIQUE KEY uk_document_vector_file_user_chunk (file_md5, user_id, chunk_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文档向量存储表';
 
 CREATE TABLE mineru_parse_result (
                                      id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',

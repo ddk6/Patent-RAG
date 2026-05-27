@@ -4,7 +4,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -18,42 +17,14 @@ public class FileTypeValidationService {
     private static final Logger logger = LoggerFactory.getLogger(FileTypeValidationService.class);
 
     /**
-     * 支持的文档类型扩展名（可以被Apache Tika解析并向量化的文件类型）
+     * 专利链路仅支持 PDF，复杂版式由 MinerU 兜底。
      */
-    private static final Set<String> SUPPORTED_DOCUMENT_EXTENSIONS = new HashSet<>(Arrays.asList(
-            // 文档类型
-            "pdf",          // PDF文档
-            "doc", "docx",  // Microsoft Word文档
-            "xls", "xlsx",  // Microsoft Excel表格
-            "ppt", "pptx",  // Microsoft PowerPoint演示文稿
-            "txt",          // 纯文本文件
-            "rtf",          // 富文本格式
-            "md",           // Markdown文档
-            
-            // OpenDocument格式
-            "odt",          // OpenDocument文本文档
-            "ods",          // OpenDocument电子表格
-            "odp",          // OpenDocument演示文稿
-            
-            // 网页和标记语言
-            "html", "htm",  // HTML文档
-            "xml",          // XML文档
-            "json",         // JSON文件
-            "csv",          // CSV文件
-            
-            // 电子书格式
-            "epub",         // EPUB电子书
-            
-            // 其他文档格式
-            "pages",        // Apple Pages文档
-            "numbers",      // Apple Numbers表格
-            "keynote"       // Apple Keynote演示文稿
-    ));
+    private static final Set<String> SUPPORTED_DOCUMENT_EXTENSIONS = Set.of("pdf");
 
     /**
      * 不支持的文件类型扩展名（无法有效解析文本内容的文件类型）
      */
-    private static final Set<String> UNSUPPORTED_EXTENSIONS = new HashSet<>(Arrays.asList(
+    private static final Set<String> UNSUPPORTED_EXTENSIONS = Set.of(
             // 图片文件
             "jpg", "jpeg", "png", "gif", "bmp", "svg", "webp", "tiff", "ico", "psd",
             
@@ -80,7 +51,7 @@ public class FileTypeValidationService {
             
             // 其他二进制文件
             "bin", "dat", "iso", "img"
-    ));
+    );
 
     /**
      * 验证文件类型是否支持
@@ -114,14 +85,14 @@ public class FileTypeValidationService {
 
         // 检查是否为明确不支持的类型
         if (UNSUPPORTED_EXTENSIONS.contains(extension)) {
-            String message = String.format("不支持的文件类型：%s。系统仅支持文档类型文件的解析和向量化", fileType);
+            String message = String.format("不支持的文件类型：%s。专利检索与审查系统仅支持 PDF 专利文件", fileType);
             logger.warn("文件类型验证失败: fileName={}, extension={}, fileType={}, reason=unsupported_type", 
                       fileName, extension, fileType);
             return new FileTypeValidationResult(false, message, fileType, extension);
         }
 
         // 对于未知的文件类型，给出提示
-        String message = String.format("未知的文件类型：%s。建议使用支持的文档格式（如PDF、Word、Excel、PowerPoint、文本文件等）", fileType);
+        String message = String.format("未知的文件类型：%s。专利检索与审查系统仅支持 PDF 专利文件", fileType);
         logger.warn("文件类型验证失败: fileName={}, extension={}, fileType={}, reason=unknown_type", 
                   fileName, extension, fileType);
         return new FileTypeValidationResult(false, message, fileType, extension);

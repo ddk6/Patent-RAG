@@ -1212,15 +1212,15 @@ public class AdminController {
     public ResponseEntity<?> clearElasticsearch(@RequestHeader("Authorization") String token) {
         String adminUsername = jwtUtils.extractUsernameFromToken(token.replace("Bearer ", ""));
         try {
-            long deleted = elasticsearchService.deleteAllDocuments();
+            long deleted = elasticsearchService.deleteAllPatentChunks();
             return ResponseEntity.ok(Map.of(
                     "code", 200,
-                    "message", "ES 知识库已清空",
+                    "message", "ES 专利索引已清空",
                     "deleted", deleted
             ));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("code", 500, "message", "清空 ES 失败：" + e.getMessage()));
+                    .body(Map.of("code", 500, "message", "清空专利 ES 失败：" + e.getMessage()));
         }
     }
 
@@ -1254,7 +1254,7 @@ public class AdminController {
         String adminUsername = jwtUtils.extractUsernameFromToken(token.replace("Bearer ", ""));
         try {
             // Clear ES
-            long esDeleted = elasticsearchService.deleteAllDocuments();
+            long esDeleted = elasticsearchService.deleteAllPatentChunks();
 
             // Clear Redis
             Set<String> redisKeys = redisTemplate.keys("*");

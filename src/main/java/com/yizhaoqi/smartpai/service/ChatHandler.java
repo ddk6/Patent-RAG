@@ -27,7 +27,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.regex.Pattern;
 
 /**
  * 聊天处理服务
@@ -44,14 +43,7 @@ public class ChatHandler {
     private static final int MAX_EVIDENCE_SNIPPET_LEN = 160;
     private static final int MAX_CONVERSATION_ROUNDS = 5;  // 最多保留5轮对话（10条消息）
     private static final int MAX_MESSAGES = MAX_CONVERSATION_ROUNDS * 2;  // 10条消息
-    private static final Pattern PATENT_NUMBER_PATTERN = Pattern.compile("(CN\\s?\\d{6,}[A-Z]?|\\b\\d{10,16}\\b)", Pattern.CASE_INSENSITIVE);
-    private static final List<String> PATENT_QUERY_KEYWORDS = List.of(
-            "专利", "权利要求", "独立权利要求", "从属权利要求", "说明书", "公开号", "公布号", "公告号",
-            "申请号", "申请人", "发明人", "ipc", "保护范围", "技术方案", "技术特征", "实施例",
-            "新颖性", "创造性", "侵权", "等同", "摘要", "附图"
-    );
     private final RedisTemplate<String, String> redisTemplate;
-    private final HybridSearchService searchService;
     private final PatentSearchService patentSearchService;
     private final LlmProviderRouter llmProviderRouter;
     private final RateLimitService rateLimitService;
@@ -70,7 +62,6 @@ public class ChatHandler {
     private final Map<String, Map<Integer, ReferenceInfo>> sessionReferenceMappings = new ConcurrentHashMap<>();
 
     public ChatHandler(RedisTemplate<String, String> redisTemplate,
-                      HybridSearchService searchService,
                       PatentSearchService patentSearchService,
                       LlmProviderRouter llmProviderRouter,
                       RateLimitService rateLimitService,
@@ -78,7 +69,6 @@ public class ChatHandler {
                       ConversationMemoryService conversationMemoryService,
                       @Qualifier("chatMonitorExecutor") ThreadPoolTaskExecutor chatMonitorExecutor) {
         this.redisTemplate = redisTemplate;
-        this.searchService = searchService;
         this.patentSearchService = patentSearchService;
         this.llmProviderRouter = llmProviderRouter;
         this.rateLimitService = rateLimitService;
@@ -114,7 +104,7 @@ public class ChatHandler {
             String longTermMemoryContext = buildLongTermMemoryContext(longTermMemories);
             logger.debug("检索到 {} 条长期记忆", longTermMemories.size());
 
-            // 3. 执行带权限过滤的检索。专利问题优先走专利结构化索引，普通问题保留原通用 RAG。
+            // 3. 执行带权限过滤的专利结构化检索。
             List<SearchResult> searchResults = retrieveRagContext(userMessage, userId);
             logger.debug("搜索结果数量: {}", searchResults.size());
             
@@ -432,10 +422,6 @@ public class ChatHandler {
     }
 
     private List<SearchResult> retrieveRagContext(String userMessage, String userId) {
-        if (!isPatentQuery(userMessage)) {
-            return searchService.searchWithPermission(userMessage, userId, 5);
-        }
-
         try {
             PatentSearchRequest request = new PatentSearchRequest();
             request.setQuery(userMessage);
@@ -450,21 +436,9 @@ public class ChatHandler {
             logger.info("[ChatRAG] 专利检索无结果，不回退通用检索: userId={}", userId);
             return List.of();
         } catch (Exception e) {
-            logger.warn("[ChatRAG] 专利检索失败，回退通用检索: userId={}, error={}", userId, e.getMessage(), e);
+            logger.warn("[ChatRAG] 专利检索失败，不回退通用检索: userId={}, error={}", userId, e.getMessage(), e);
+            return List.of();
         }
-
-        return searchService.searchWithPermission(userMessage, userId, 5);
-    }
-
-    private boolean isPatentQuery(String userMessage) {
-        if (userMessage == null || userMessage.isBlank()) {
-            return false;
-        }
-        String normalized = userMessage.toLowerCase();
-        if (PATENT_NUMBER_PATTERN.matcher(normalized).find()) {
-            return true;
-        }
-        return PATENT_QUERY_KEYWORDS.stream().anyMatch(normalized::contains);
     }
 
     private SearchResult toSearchResult(PatentSearchResult patentResult) {

@@ -109,59 +109,6 @@ public class DocumentController {
         }
     }
 
-    @PostMapping("/{fileMd5}/reindex")
-    public ResponseEntity<?> reindexDocument(
-            @PathVariable String fileMd5,
-            @RequestAttribute("userId") String userId,
-            @RequestAttribute("role") String role) {
-
-        LogUtils.PerformanceMonitor monitor = LogUtils.startPerformanceMonitor("REINDEX_DOCUMENT");
-        try {
-            LogUtils.logBusiness("REINDEX_DOCUMENT", userId, "接收到重建文档索引请求: fileMd5=%s, role=%s", fileMd5, role);
-
-            Optional<FileUpload> fileOpt = fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5);
-            if (fileOpt.isEmpty()) {
-                monitor.end("重建失败：文档不存在");
-                Map<String, Object> response = new HashMap<>();
-                response.put("code", HttpStatus.NOT_FOUND.value());
-                response.put("message", "文档不存在");
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
-            }
-
-            FileUpload file = fileOpt.get();
-            if (!file.getUserId().equals(userId) && !"ADMIN".equals(role)) {
-                monitor.end("重建失败：权限不足");
-                Map<String, Object> response = new HashMap<>();
-                response.put("code", HttpStatus.FORBIDDEN.value());
-                response.put("message", "没有权限重建此文档索引");
-                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(response);
-            }
-
-            var result = documentService.reindexDocument(fileMd5, userId);
-            monitor.end("文档索引重建成功");
-
-            Map<String, Object> data = new HashMap<>();
-            data.put("fileMd5", fileMd5);
-            data.put("fileName", file.getFileName());
-            data.put("actualEmbeddingTokens", result.actualEmbeddingTokens());
-            data.put("actualChunkCount", result.actualChunkCount());
-            data.put("modelVersion", result.modelVersion());
-
-            Map<String, Object> response = new HashMap<>();
-            response.put("code", 200);
-            response.put("message", "文档索引重建成功");
-            response.put("data", data);
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            LogUtils.logBusinessError("REINDEX_DOCUMENT", userId, "重建文档索引失败: fileMd5=%s", e, fileMd5);
-            monitor.end("重建失败: " + e.getMessage());
-            Map<String, Object> response = new HashMap<>();
-            response.put("code", HttpStatus.INTERNAL_SERVER_ERROR.value());
-            response.put("message", "重建文档索引失败: " + e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
-        }
-    }
-    
     /**
      * 获取用户可访问的所有文件列表
      * 

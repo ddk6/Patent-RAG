@@ -2,18 +2,21 @@ package com.yizhaoqi.smartpai.service;
 
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.User;
+import com.yizhaoqi.smartpai.model.patent.PatentDocument;
 import com.yizhaoqi.smartpai.repository.ChunkInfoRepository;
-import com.yizhaoqi.smartpai.repository.DocumentVectorRepository;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.repository.MinerUParseResultRepository;
 import com.yizhaoqi.smartpai.repository.UserRepository;
+import com.yizhaoqi.smartpai.repository.patent.PatentChunkRepository;
+import com.yizhaoqi.smartpai.repository.patent.PatentClaimRepository;
+import com.yizhaoqi.smartpai.repository.patent.PatentDocumentRepository;
+import com.yizhaoqi.smartpai.repository.patent.PatentSectionRepository;
 import io.minio.GetObjectArgs;
 import io.minio.GetPresignedObjectUrlArgs;
 import io.minio.MinioClient;
 import io.minio.RemoveObjectArgs;
 import io.minio.http.Method;
 import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.tika.exception.TikaException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -57,7 +60,16 @@ public class DocumentService {
     private ChunkInfoRepository chunkInfoRepository;
 
     @Autowired
-    private DocumentVectorRepository documentVectorRepository;
+    private PatentDocumentRepository patentDocumentRepository;
+
+    @Autowired
+    private PatentChunkRepository patentChunkRepository;
+
+    @Autowired
+    private PatentClaimRepository patentClaimRepository;
+
+    @Autowired
+    private PatentSectionRepository patentSectionRepository;
 
     @Autowired
     private MinerUParseResultRepository mineruParseResultRepository;
@@ -80,19 +92,13 @@ public class DocumentService {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
-    @Autowired
-    private ParseService parseService;
-
-    @Autowired
-    private VectorizationService vectorizationService;
-
     /**
      * 删除文档及其相关数据
      * 该方法将删除:
      * 1. FileUpload记录
-     * 2. DocumentVector记录
+     * 2. 专利结构化记录
      * 3. MinIO中的文件
-     * 4. Elasticsearch中的向量数据
+     * 4. Elasticsearch中的专利向量数据
      *
      * @param fileMd5 文件MD5
      */
@@ -114,17 +120,17 @@ public class DocumentService {
             }
 
             try {
-                long deletedCount = elasticsearchService.deleteByFileMd5AndUserId(fileMd5, userId);
-                logger.info("成功从 Elasticsearch 删除当前用户文档: fileMd5={}, userId={}, deleted={}",
+                long deletedCount = elasticsearchService.deletePatentByFileMd5AndUserId(fileMd5, userId);
+                logger.info("成功从 Elasticsearch 删除当前用户专利文档: fileMd5={}, userId={}, deleted={}",
                         fileMd5, userId, deletedCount);
             } catch (Exception e) {
-                logger.error("从 Elasticsearch 删除当前用户文档失败，将继续清理数据库: fileMd5={}, userId={}",
+                logger.error("从 Elasticsearch 删除当前用户专利文档失败，将继续清理数据库: fileMd5={}, userId={}",
                         fileMd5, userId, e);
             }
 
-            documentVectorRepository.deleteByFileMd5AndUserId(fileMd5, userId);
+            deletePatentRecords(fileMd5, userId);
             fileUploadRepository.deleteByFileMd5AndUserId(fileMd5, userId);
-            logger.info("已删除当前用户文件记录和向量记录: fileMd5={}, userId={}", fileMd5, userId);
+            logger.info("已删除当前用户文件记录和专利结构化记录: fileMd5={}, userId={}", fileMd5, userId);
 
             // 2. 如果没有其他文件记录引用该 MD5，再删除共享残留。
             long remainingFileCount = fileUploadRepository.countByFileMd5(fileMd5);
@@ -142,60 +148,6 @@ public class DocumentService {
         }
     }
 
-    @Transactional
-    public VectorizationService.VectorizationUsageResult reindexDocument(String fileMd5, String requesterId) {
-        logger.info("开始重建文档索引: fileMd5={}, requesterId={}", fileMd5, requesterId);
-
-        FileUpload fileUpload = fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5)
-                .orElseThrow(() -> new RuntimeException("文件不存在"));
-
-        try (InputStream fileStream = uploadService.getMergedFileStream(fileMd5)) {
-            try {
-                elasticsearchService.deleteByFileMd5(fileMd5);
-                logger.info("重建前已清理 Elasticsearch 文档: {}", fileMd5);
-            } catch (Exception e) {
-                logger.warn("重建前清理 Elasticsearch 失败: fileMd5={}, error={}", fileMd5, e.getMessage());
-            }
-
-            documentVectorRepository.deleteByFileMd5(fileMd5);
-            invalidatePdfSinglePagePreviewCache(fileMd5);
-
-            parseService.parseAndSave(
-                    fileMd5,
-                    fileStream,
-                    fileUpload.getUserId(),
-                    fileUpload.getOrgTag(),
-                    fileUpload.isPublic()
-            );
-
-            VectorizationService.VectorizationUsageResult result = vectorizationService.vectorizeWithUsage(
-                    fileMd5,
-                    fileUpload.getUserId(),
-                    fileUpload.getOrgTag(),
-                    fileUpload.isPublic(),
-                    requesterId
-            );
-
-            fileUpload.setActualEmbeddingTokens((long) result.actualEmbeddingTokens());
-            fileUpload.setActualChunkCount(result.actualChunkCount());
-            fileUploadRepository.save(fileUpload);
-
-            logger.info(
-                    "文档索引重建完成: fileMd5={}, actualTokens={}, actualChunkCount={}",
-                    fileMd5,
-                    result.actualEmbeddingTokens(),
-                    result.actualChunkCount()
-            );
-            return result;
-        } catch (TikaException e) {
-            logger.error("重建文档索引失败，文档解析异常: {}", fileMd5, e);
-            throw new RuntimeException("重建文档索引失败: " + e.getMessage(), e);
-        } catch (Exception e) {
-            logger.error("重建文档索引失败: {}", fileMd5, e);
-            throw new RuntimeException("重建文档索引失败: " + e.getMessage(), e);
-        }
-    }
-    
     /**
      * 获取用户可访问的所有文件列表
      * 包括用户自己的文件、公开文件和用户所属组织的文件（支持层级权限）
@@ -437,10 +389,13 @@ public class DocumentService {
 
     private void deleteSharedDocumentResources(String fileMd5, String fileName) {
         try {
-            long deletedCount = elasticsearchService.deleteByFileMd5(fileMd5);
-            logger.info("成功从 Elasticsearch 删除文档: fileMd5={}, deleted={}", fileMd5, deletedCount);
+            for (PatentDocument patentDocument : patentDocumentRepository.findByFileMd5(fileMd5)) {
+                long deletedCount = elasticsearchService.deletePatentByPatentId(patentDocument.getId());
+                logger.info("成功从 Elasticsearch 删除专利文档: fileMd5={}, patentId={}, deleted={}",
+                        fileMd5, patentDocument.getId(), deletedCount);
+            }
         } catch (Exception e) {
-            logger.error("从 Elasticsearch 删除文档时出错: fileMd5={}", fileMd5, e);
+            logger.error("从 Elasticsearch 删除专利文档时出错: fileMd5={}", fileMd5, e);
         }
 
         deleteMinioObject("merged/" + fileMd5);
@@ -459,13 +414,6 @@ public class DocumentService {
         }
 
         try {
-            documentVectorRepository.deleteByFileMd5(fileMd5);
-            logger.info("成功删除文档向量记录: fileMd5={}", fileMd5);
-        } catch (Exception e) {
-            logger.error("删除文档向量记录失败: fileMd5={}", fileMd5, e);
-        }
-
-        try {
             mineruParseResultRepository.deleteByFileMd5(fileMd5);
             logger.info("成功删除 MinerU 解析结果: fileMd5={}", fileMd5);
         } catch (Exception e) {
@@ -473,6 +421,21 @@ public class DocumentService {
         }
 
         invalidatePdfSinglePagePreviewCache(fileMd5);
+    }
+
+    private void deletePatentRecords(String fileMd5, String userId) {
+        List<PatentDocument> patentDocuments = patentDocumentRepository.findByFileMd5(fileMd5).stream()
+                .filter(document -> userId == null || userId.equals(document.getUserId()))
+                .toList();
+        for (PatentDocument patentDocument : patentDocuments) {
+            Long patentId = patentDocument.getId();
+            patentChunkRepository.deleteByPatentId(patentId);
+            patentClaimRepository.deleteByPatentId(patentId);
+            patentSectionRepository.deleteByPatentId(patentId);
+            patentDocumentRepository.delete(patentDocument);
+        }
+        logger.info("成功删除专利结构化记录: fileMd5={}, userId={}, patentCount={}",
+                fileMd5, userId, patentDocuments.size());
     }
 
     private void deleteMinioObject(String objectName) {

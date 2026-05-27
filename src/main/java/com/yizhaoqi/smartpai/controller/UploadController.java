@@ -8,9 +8,9 @@ import com.yizhaoqi.smartpai.model.OrganizationTag;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.service.DocumentTypeResolver;
 import com.yizhaoqi.smartpai.service.FileTypeValidationService;
-import com.yizhaoqi.smartpai.service.ParseService;
 import com.yizhaoqi.smartpai.service.UploadService;
 import com.yizhaoqi.smartpai.service.UserService;
+import com.yizhaoqi.smartpai.service.patent.PatentEmbeddingEstimateService;
 import com.yizhaoqi.smartpai.utils.LogUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -51,10 +51,10 @@ public class UploadController {
     private FileTypeValidationService fileTypeValidationService;
 
     @Autowired
-    private ParseService parseService;
+    private DocumentTypeResolver documentTypeResolver;
 
     @Autowired
-    private DocumentTypeResolver documentTypeResolver;
+    private PatentEmbeddingEstimateService patentEmbeddingEstimateService;
 
     public UploadController(UploadService uploadService, KafkaTemplate<String, Object> kafkaTemplate) {
         this.uploadService = uploadService;
@@ -266,7 +266,7 @@ public class UploadController {
             data.put("fileType", fileType);
             data.put("documentType", fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId)
                     .map(FileUpload::getDocumentType)
-                    .orElse(FileUpload.DOCUMENT_TYPE_GENERAL));
+                    .orElse(FileUpload.DOCUMENT_TYPE_PATENT));
             
             // 构建统一响应格式
             Map<String, Object> response = new HashMap<>();
@@ -411,16 +411,16 @@ public class UploadController {
             fileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(request.fileMd5(), userId)
                     .orElseThrow(() -> new RuntimeException("文件记录不存在"));
 
-            ParseService.EmbeddingEstimate embeddingEstimate = null;
-            try (io.minio.GetObjectResponse mergedFileStream = uploadService.getMergedFileStream(request.fileMd5())) {
-                embeddingEstimate = parseService.estimateEmbeddingUsage(mergedFileStream);
+            PatentEmbeddingEstimateService.EmbeddingEstimate embeddingEstimate = null;
+            try (var mergedFileStream = uploadService.getMergedFileStream(request.fileMd5())) {
+                embeddingEstimate = patentEmbeddingEstimateService.estimate(mergedFileStream);
                 fileUpload.setEstimatedEmbeddingTokens(embeddingEstimate.estimatedTokens());
                 fileUpload.setEstimatedChunkCount(embeddingEstimate.estimatedChunkCount());
                 fileUploadRepository.save(fileUpload);
                 LogUtils.logBusiness(
                         "MERGE_FILE",
                         userId,
-                        "文档 Embedding 预估完成: fileMd5=%s, estimatedTokens=%d, estimatedChunkCount=%d",
+                        "专利 Embedding 预估完成: fileMd5=%s, estimatedTokens=%d, estimatedChunkCount=%d",
                         request.fileMd5(),
                         embeddingEstimate.estimatedTokens(),
                         embeddingEstimate.estimatedChunkCount()
@@ -429,7 +429,7 @@ public class UploadController {
                 LogUtils.logBusinessError(
                         "MERGE_FILE",
                         userId,
-                        "文档 Embedding 预估失败: fileMd5=%s, fileName=%s",
+                        "专利 Embedding 预估失败: fileMd5=%s, fileName=%s",
                         estimateException,
                         request.fileMd5(),
                         request.fileName()
@@ -526,8 +526,7 @@ public class UploadController {
         boolean shouldUpdate = explicitDocumentType
                 || fileUpload.getDocumentType() == null
                 || fileUpload.getDocumentType().isBlank()
-                || (FileUpload.DOCUMENT_TYPE_GENERAL.equals(currentDocumentType)
-                && FileUpload.DOCUMENT_TYPE_PATENT.equals(normalizedDocumentType));
+                || !FileUpload.DOCUMENT_TYPE_PATENT.equals(currentDocumentType);
 
         if (shouldUpdate && !normalizedDocumentType.equals(currentDocumentType)) {
             fileUpload.setDocumentType(normalizedDocumentType);
@@ -544,7 +543,7 @@ public class UploadController {
         if (FileUpload.DOCUMENT_TYPE_PATENT.equalsIgnoreCase(documentType)) {
             return FileUpload.DOCUMENT_TYPE_PATENT;
         }
-        return FileUpload.DOCUMENT_TYPE_GENERAL;
+        return FileUpload.DOCUMENT_TYPE_PATENT;
     }
 
     /**
@@ -614,7 +613,7 @@ public class UploadController {
             Map<String, Object> data = new HashMap<>();
             data.put("supportedTypes", supportedTypes);
             data.put("supportedExtensions", supportedExtensions);
-            data.put("description", "系统支持的文档类型文件，这些文件可以被解析并进行向量化处理");
+            data.put("description", "系统支持专利 PDF 文件解析、结构化和向量化处理");
             
             // 构建统一响应格式
             Map<String, Object> response = new HashMap<>();

@@ -3,21 +3,17 @@ package com.yizhaoqi.smartpai.consumer;
 import com.yizhaoqi.smartpai.config.KafkaConfig;
 import com.yizhaoqi.smartpai.config.MinerUProperties;
 import com.yizhaoqi.smartpai.config.PatentParserProperties;
-import com.yizhaoqi.smartpai.model.DocumentVector;
 import com.yizhaoqi.smartpai.model.FileProcessingTask;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.MinerUParseResult;
-import com.yizhaoqi.smartpai.repository.DocumentVectorRepository;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.repository.MinerUParseResultRepository;
 import com.yizhaoqi.smartpai.service.MinerUService;
-import com.yizhaoqi.smartpai.service.ParseService;
-import com.yizhaoqi.smartpai.service.VectorizationService;
-import com.yizhaoqi.smartpai.service.patent.PatentDocumentDetector;
 import com.yizhaoqi.smartpai.service.patent.PatentIngestionService;
 import com.yizhaoqi.smartpai.service.patent.PatentParseQualityEvaluator;
 import com.yizhaoqi.smartpai.service.patent.PatentParserClient;
 import com.yizhaoqi.smartpai.service.patent.PatentVectorizationService;
+import com.yizhaoqi.smartpai.service.patent.PatentVectorizationService.VectorizationUsageResult;
 import com.yizhaoqi.smartpai.service.patent.dto.PatentParserRequest;
 import com.yizhaoqi.smartpai.service.patent.dto.PatentParserResult;
 import com.yizhaoqi.smartpai.model.patent.PatentDocument;
@@ -41,15 +37,11 @@ import java.util.Optional;
 @Slf4j
 public class FileProcessingConsumer {
 
-    private final ParseService parseService;
-    private final VectorizationService vectorizationService;
     private final FileUploadRepository fileUploadRepository;
     private final MinerUParseResultRepository mineruParseResultRepository;
-    private final DocumentVectorRepository documentVectorRepository;
     private final MinerUService minerUService;
     private final MinerUProperties minerUProperties;
     private final PatentParserProperties patentParserProperties;
-    private final PatentDocumentDetector patentDocumentDetector;
     private final PatentIngestionService patentIngestionService;
     private final PatentParseQualityEvaluator patentParseQualityEvaluator;
     private final PatentParserClient patentParserClient;
@@ -59,41 +51,28 @@ public class FileProcessingConsumer {
 
 
     public FileProcessingConsumer(
-            ParseService parseService,
-            VectorizationService vectorizationService,
             FileUploadRepository fileUploadRepository,
             MinerUParseResultRepository mineruParseResultRepository,
-            DocumentVectorRepository documentVectorRepository,
             MinerUService minerUService,
             MinerUProperties minerUProperties,
             PatentParserProperties patentParserProperties,
-            PatentDocumentDetector patentDocumentDetector,
             PatentIngestionService patentIngestionService,
             PatentParseQualityEvaluator patentParseQualityEvaluator,
             PatentParserClient patentParserClient,
             PatentVectorizationService patentVectorizationService
     ) {
-        this.parseService = parseService;
-        this.vectorizationService = vectorizationService;
         this.fileUploadRepository = fileUploadRepository;
         this.mineruParseResultRepository = mineruParseResultRepository;
-        this.documentVectorRepository = documentVectorRepository;
         this.minerUService = minerUService;
         this.minerUProperties = minerUProperties;
         this.patentParserProperties = patentParserProperties;
-        this.patentDocumentDetector = patentDocumentDetector;
         this.patentIngestionService = patentIngestionService;
         this.patentParseQualityEvaluator = patentParseQualityEvaluator;
         this.patentParserClient = patentParserClient;
         this.patentVectorizationService = patentVectorizationService;
     }
 
-    //这是处理文件解析任务的方法
-    //从Kafka主题中监听文件解析任务
-    //根据任务类型，选择不同的解析器
-    //如果解析器失败，尝试降级到 Tika 解析
-    //如果 Tika 解析也失败，更新任务状态为 FAILED
-    //如果解析成功，更新任务状态为 COMPLETED
+    // 处理专利文件解析任务：直提优先，MinerU 兜底，不再写通用知识库链路。
     @KafkaListener(topics = "#{kafkaConfig.getFileProcessingTopic()}", groupId = "#{kafkaConfig.getFileProcessingGroupId()}")
     public void processTask(FileProcessingTask task) {
         log.info("Received task: {}", task);
@@ -106,74 +85,29 @@ public class FileProcessingConsumer {
             return;
         }
 
-        // 更新解析状态为 PROCESSING  这个状态存在哪个表
-        // 这个状态存在mineru_parse_result表中
-        // 这个表是MinerU解析结果的存储表
-        // 这个表的字段有：fileMd5, parser, status, createdAt, updatedAt
-        //这个表存在哪？
-        // 这个表存在数据库中
-        updateParseStatus(task, "PROCESSING", resolveInitialParseMethod(task));
+        updateParseStatus(task, "PROCESSING", "PATENT");
 
         try {
-            if (isPatentDocumentRequested(task)) {
-                if (processPatentDirectParse(task)) {
-                    return;
-                }
-                if (!minerUProperties.isEnabled()) {
-                    throw new IllegalStateException("专利直提未通过质量门禁，且 MinerU 未启用，无法继续专利链路");
-                }
+            if (processPatentDirectParse(task)) {
+                return;
+            }
+            if (!minerUProperties.isEnabled()) {
+                throw new IllegalStateException("专利直提未通过质量门禁，且 MinerU 未启用，无法继续专利链路");
             }
 
-            // ========== 根据配置选择解析器 ==========
-            if (minerUProperties.isEnabled()) {
-                // ========== MinerU 解析流程 ==========
-                processWithMinerU(task);
-            } else {
-                // ========== 原有 Tika 解析流程 ==========
-                processWithTika(task);
-            }
-
-            // 更新解析状态为 COMPLETED
-            updateParseStatus(task, "COMPLETED", null);
-
-        }
-        //异常处理
-        //如果MinerU解析失败，尝试降级到 Tika 解析
-        //如果 Tika 解析也失败，更新任务状态为 FAILED
-        //如果解析成功，更新任务状态为 COMPLETED
-        //
-        catch (Exception e) {
-            log.error("文件解析失败: fileMd5={}", task.getFileMd5(), e);
-
-            if (isPatentDocumentRequested(task)) {
-                updateParseStatus(task, "FAILED", "PATENT");
-                throw new RuntimeException("Patent document processing failed", e);
-            }
-
-            // 检查是否应该降级到 Tika
-            if (minerUProperties.isEnabled() && isMinerURelatedError(e)) {
-                log.warn("[MinerU] MinerU 解析失败，尝试降级到 Tika: {}", task.getFileMd5());
-                try {
-                    processWithTika(task);
-                    updateParseStatus(task, "COMPLETED", "TIKA");
-                    log.info("[MinerU] Tika 降级解析成功: {}", task.getFileMd5());
-                } catch (Exception tikaEx) {
-                    log.error("[MinerU] Tika 降级解析也失败: {}", task.getFileMd5(), tikaEx);
-                    updateParseStatus(task, "FAILED", "TIKA");
-                    throw new RuntimeException("Both MinerU and Tika parsing failed", tikaEx);
-                }
-            } else {
-                updateParseStatus(task, "FAILED", null);
-                throw new RuntimeException("Error processing task", e);
-            }
+            processWithMinerUPatent(task);
+        } catch (Exception e) {
+            log.error("[Patent] 专利解析失败: fileMd5={}", task.getFileMd5(), e);
+            updateParseStatus(task, "FAILED", "PATENT");
+            throw new RuntimeException("Patent document processing failed", e);
         }
     }
 
     /**
-     * MinerU 解析流程
+     * MinerU 专利兜底解析流程。
      */
-    private void processWithMinerU(FileProcessingTask task) throws Exception {
-        log.info("[MinerU] 开始 MinerU 解析: fileMd5={}", task.getFileMd5());
+    private void processWithMinerUPatent(FileProcessingTask task) throws Exception {
+        log.info("[Patent] 开始 MinerU 专利兜底解析: fileMd5={}", task.getFileMd5());
 
         // 1. 下载文件到临时路径
         //如果文件是本地文件，直接返回文件流 然后调用MinerU API解析文件
@@ -196,36 +130,8 @@ public class FileProcessingConsumer {
             //这个表存在数据库中
             saveMinerUResult(task.getFileMd5(), parseResult);
 
-            PatentRoute patentRoute = resolvePatentRoute(task, parseResult);
-            if (patentRoute != PatentRoute.NONE) {
-                boolean patentHandled = processPatentParseResult(task, parseResult, patentRoute == PatentRoute.AUTO);
-                if (patentHandled) {
-                    log.info("[Patent] 专利链路处理完成，跳过通用 chunk/vectorize: fileMd5={}", task.getFileMd5());
-                    return;
-                }
-                log.warn("[Patent] 自动识别专利链路未完成，降级继续通用 MinerU 链路: fileMd5={}", task.getFileMd5());
-            }
-
-            // 4. V3: 保存 chunks 到 document_vectors 表（带 V3 metadata）
-            //这个表存的是分块后的文本内容
-            //这个表存在数据库中
-            saveMinerUChunksToDocumentVector(task, parseResult);
-            updateParseStatus(task, "CHUNKS_SAVED", null);
-
-            // 5. 向量化处理
-            //这里调用向量化服务，将MinerU解析结果中的文本内容向量化
-            //向量化结果是一个JSON文件，包含向量信息 和 向量使用情况
-            //task就是MinerU解析结果的存储表 字段有：fileMd5, parser, status, createdAt, updatedAt、userId、orgTag、isPublic、userId等
-            updateParseStatus(task, "VECTORIZING", null);
-            VectorizationService.VectorizationUsageResult vectorizationResult = vectorizationService.vectorizeWithUsage(
-                    task.getFileMd5(),
-                    task.getUserId(),
-                    task.getOrgTag(),
-                    task.isPublic(),
-                    task.getUserId()
-            );
-            updateActualEmbeddingUsage(task, vectorizationResult);
-            log.info("[MinerU] 向量化完成: fileMd5={}", task.getFileMd5());
+            processPatentParseResult(task, parseResult);
+            log.info("[Patent] MinerU 专利兜底链路处理完成: fileMd5={}", task.getFileMd5());
 
         } finally {
             // 6. 清理临时文件
@@ -234,109 +140,6 @@ public class FileProcessingConsumer {
                 Files.deleteIfExists(filePath);
             } catch (IOException e) {
                 log.warn("[MinerU] 清理临时文件失败: {}", filePath);
-            }
-        }
-    }
-
-    /**
-     * V3: 将 MinerU chunks 保存到 document_vectors 表（带 V3 metadata）
-     */
-    //这里调用向量化服务，将MinerU解析结果中的文本内容向量化
-    //向量化结果是一个JSON文件，包含向量信息 和 向量使用情况
-    //task就是MinerU解析结果的存储表 字段有：fileMd5, parser, status, createdAt, updatedAt、userId、orgTag、isPublic、userId等
-    //向量化结果会记录向量化使用的模型版本，以及向量化消耗的计算资源
-    //向量化结果会保存到数据库中
-    //向量化结果会返回给前端
-    private void saveMinerUChunksToDocumentVector(FileProcessingTask task, MinerUService.MinerUParseResult parseResult) {
-        if (parseResult.getChunks() == null || parseResult.getChunks().isEmpty()) {
-            log.warn("[MinerU] MinerU 返回的 chunks 为空，跳过保存: fileMd5={}", task.getFileMd5());
-            return;
-        }
-
-        log.info("[MinerU] 开始保存 {} 个 chunks 到 document_vectors: fileMd5={}",
-                parseResult.getChunks().size(), task.getFileMd5());
-
-        for (MinerUService.TextChunk minerUChunk : parseResult.getChunks()) {
-            DocumentVector vector = new DocumentVector();
-            vector.setFileMd5(task.getFileMd5());
-            vector.setChunkId(minerUChunk.getChunkId());
-            vector.setTextContent(minerUChunk.getContent());
-            vector.setPageNumber(minerUChunk.getPageNumber());
-            vector.setAnchorText(minerUChunk.getAnchorText());
-            vector.setUserId(task.getUserId());
-            vector.setOrgTag(task.getOrgTag());
-            vector.setPublic(task.isPublic());
-
-            // V3 metadata
-            vector.setSectionPath(minerUChunk.getSectionPath());
-            vector.setChunkType(minerUChunk.getChunkType());
-            vector.setKeyClause(minerUChunk.isKeyClause());
-            vector.setTokenCount(minerUChunk.getTokenCount());
-
-            documentVectorRepository.upsertChunk(
-                    vector.getFileMd5(),
-                    vector.getChunkId(),
-                    vector.getTextContent(),
-                    vector.getPageNumber(),
-                    vector.getAnchorText(),
-                    vector.getModelVersion(),
-                    vector.getUserId(),
-                    vector.getOrgTag(),
-                    vector.isPublic(),
-                    vector.getSectionPath(),
-                    vector.getChunkType(),
-                    vector.isKeyClause(),
-                    vector.getTokenCount()
-            );
-        }
-
-        log.info("[MinerU] 保存 chunks 完成: fileMd5={}, count={}",
-                task.getFileMd5(), parseResult.getChunks().size());
-    }
-
-    /**
-     * 原有 Tika 解析流程
-     */
-    private void processWithTika(FileProcessingTask task) throws Exception {
-        log.info("[Tika] 开始 Tika 解析: fileMd5={}", task.getFileMd5());
-
-        InputStream fileStream = null;
-        try {
-            // 下载文件
-            fileStream = downloadFileFromStorage(task.getFilePath());
-            if (fileStream == null) {
-                throw new IOException("流为空");
-            }
-
-            // 强制转换为可缓存流
-            if (!fileStream.markSupported()) {
-                fileStream = new BufferedInputStream(fileStream);
-            }
-
-            // 解析文件
-            parseService.parseAndSave(task.getFileMd5(), fileStream,
-                    task.getUserId(), task.getOrgTag(), task.isPublic());
-            log.info("[Tika] 文件解析完成: fileMd5={}", task.getFileMd5());
-
-            // 向量化处理
-            updateParseStatus(task, "VECTORIZING", null);
-            VectorizationService.VectorizationUsageResult vectorizationResult = vectorizationService.vectorizeWithUsage(
-                    task.getFileMd5(),
-                    task.getUserId(),
-                    task.getOrgTag(),
-                    task.isPublic(),
-                    task.getUserId()
-            );
-            updateActualEmbeddingUsage(task, vectorizationResult);
-            log.info("[Tika] 向量化完成: fileMd5={}", task.getFileMd5());
-
-        } finally {
-            if (fileStream != null) {
-                try {
-                    fileStream.close();
-                } catch (IOException e) {
-                    log.error("[Tika] 关闭文件流失败", e);
-                }
             }
         }
     }
@@ -395,19 +198,13 @@ public class FileProcessingConsumer {
         }
     }
 
-    private boolean processPatentParseResult(
-            FileProcessingTask task,
-            MinerUService.MinerUParseResult minerUParseResult,
-            boolean autoDetected
-    ) {
+    private void processPatentParseResult(FileProcessingTask task, MinerUService.MinerUParseResult minerUParseResult) {
         FileUpload fileUpload = findLatestFileUpload(task.getFileMd5(), task.getUserId())
                 .orElseThrow(() -> new IllegalStateException("文件记录不存在: " + task.getFileMd5()));
         PatentDocument patentDocument = null;
 
         try {
-            if (!autoDetected) {
-                updateParseStatus(task, "PATENT_STRUCTURING", "PATENT");
-            }
+            updateParseStatus(task, "PATENT_STRUCTURING", "PATENT");
             PatentParserResult parserResult = patentParserClient.parse(new PatentParserRequest(
                     task.getFileMd5(),
                     task.getFileName(),
@@ -418,25 +215,9 @@ public class FileProcessingConsumer {
 
             validatePatentParserResult(parserResult);
 
-            if (autoDetected) {
-                updateParseStatus(task, "PATENT_STRUCTURING", "PATENT");
-            }
-
             patentDocument = patentIngestionService.begin(task, fileUpload);
             persistAndVectorizePatentResult(task, fileUpload, patentDocument, parserResult, "PATENT");
-            return true;
         } catch (Exception e) {
-            if (autoDetected) {
-                if (patentDocument != null) {
-                    patentIngestionService.markFailed(patentDocument.getId(), e.getMessage());
-                }
-                fileUpload.setDocumentType(FileUpload.DOCUMENT_TYPE_GENERAL);
-                fileUploadRepository.save(fileUpload);
-                log.warn("[Patent] 自动专利解析失败，将回退通用链路: fileMd5={}, error={}",
-                        task.getFileMd5(), e.getMessage(), e);
-                return false;
-            }
-
             if (patentDocument == null) {
                 patentDocument = patentIngestionService.begin(task, fileUpload);
             }
@@ -507,36 +288,13 @@ public class FileProcessingConsumer {
         fileUploadRepository.save(fileUpload);
 
         updateParseStatus(task, "PATENT_VECTORIZING", parseMethod);
-        VectorizationService.VectorizationUsageResult vectorizationResult = patentVectorizationService.vectorizeWithUsage(
+        VectorizationUsageResult vectorizationResult = patentVectorizationService.vectorizeWithUsage(
                 patentDocument.getId(),
                 task.getUserId()
         );
         updateActualEmbeddingUsage(task, vectorizationResult);
 
         updateParseStatus(task, "COMPLETED", parseMethod);
-    }
-
-    private PatentRoute resolvePatentRoute(FileProcessingTask task, MinerUService.MinerUParseResult parseResult) {
-        if (isPatentDocumentRequested(task)) {
-            return PatentRoute.EXPLICIT;
-        }
-        return patentDocumentDetector.isPatent(parseResult, task.getFileName()) ? PatentRoute.AUTO : PatentRoute.NONE;
-    }
-
-    private String resolveInitialParseMethod(FileProcessingTask task) {
-        if (isPatentDocumentRequested(task)) {
-            return "PATENT";
-        }
-        return minerUProperties.isEnabled() ? "MINERU" : "TIKA";
-    }
-
-    private boolean isPatentDocumentRequested(FileProcessingTask task) {
-        if (task == null || task.getFileMd5() == null) {
-            return false;
-        }
-        return findLatestFileUpload(task.getFileMd5(), task.getUserId())
-                .map(fileUpload -> FileUpload.DOCUMENT_TYPE_PATENT.equalsIgnoreCase(fileUpload.getDocumentType()))
-                .orElse(false);
     }
 
     private void validatePatentParserResult(PatentParserResult parserResult) {
@@ -561,12 +319,6 @@ public class FileProcessingConsumer {
         return value != null && !value.isBlank();
     }
 
-    private enum PatentRoute {
-        NONE,
-        EXPLICIT,
-        AUTO
-    }
-
     private Optional<FileUpload> findLatestFileUpload(String fileMd5, String userId) {
         if (fileMd5 == null) {
             return Optional.empty();
@@ -588,17 +340,6 @@ public class FileProcessingConsumer {
                 .findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(task.getFileMd5(), task.getUserId())
                 .map(fileUpload -> "COMPLETED".equalsIgnoreCase(fileUpload.getParseStatus()))
                 .orElse(false);
-    }
-
-    /**
-     * 判断是否为 MinerU 相关错误（用于决定是否降级）
-     */
-    private boolean isMinerURelatedError(Exception e) {
-        String message = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
-        return message.contains("mineru") ||
-                message.contains("timeout") ||
-                message.contains("connection") ||
-                message.contains("network");
     }
 
     /**
@@ -686,7 +427,7 @@ public class FileProcessingConsumer {
     //如果文件记录不存在，也返回
     private void updateActualEmbeddingUsage(
             FileProcessingTask task,
-            VectorizationService.VectorizationUsageResult vectorizationResult
+            VectorizationUsageResult vectorizationResult
     ) {
         if (task == null || vectorizationResult == null || task.getFileMd5() == null || task.getUserId() == null) {
             return;

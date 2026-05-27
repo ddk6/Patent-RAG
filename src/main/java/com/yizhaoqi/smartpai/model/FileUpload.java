@@ -85,10 +85,10 @@ public class FileUpload {
 
     /**
      * 文档类型
-     * GENERAL 表示通用文档 RAG，PATENT 表示专利结构化 RAG。
+     * PATENT 表示专利结构化 RAG；GENERAL 仅用于历史数据兼容。
      */
     @Column(name = "document_type", length = 32, nullable = false)
-    private String documentType = DOCUMENT_TYPE_GENERAL;
+    private String documentType = DOCUMENT_TYPE_PATENT;
 
     /**
      * 文件上传的创建时间

@@ -21,7 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-// 确保在 BootstrapKnowledgeInitializer 之前进行初始化
+// 初始化专利检索索引。
 @Order(2)
 @Component
 @ConditionalOnProperty(name = "elasticsearch.init.enabled", havingValue = "true", matchIfMissing = true)
@@ -31,9 +31,6 @@ public class EsIndexInitializer implements CommandLineRunner {
 
     @Autowired
     private ElasticsearchClient esClient;
-
-    @Value("classpath:es-mappings/knowledge_base.json") // 加载 JSON 文件
-    private org.springframework.core.io.Resource knowledgeBaseMappingResource;
 
     @Value("classpath:es-mappings/patent_chunks.json")
     private org.springframework.core.io.Resource patentChunksMappingResource;
@@ -82,7 +79,6 @@ public class EsIndexInitializer implements CommandLineRunner {
      * @throws Exception
      */
     private void initializeIndex() throws Exception {
-        ensureIndex("knowledge_base", knowledgeBaseMappingResource);
         ensureIndex("patent_chunks", patentChunksMappingResource);
     }
 
