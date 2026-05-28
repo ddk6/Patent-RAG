@@ -1,9 +1,13 @@
 package com.yizhaoqi.smartpai.controller;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.OrganizationTag;
+import com.yizhaoqi.smartpai.model.patent.PatentDocument;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.repository.OrganizationTagRepository;
+import com.yizhaoqi.smartpai.repository.patent.PatentDocumentRepository;
 import com.yizhaoqi.smartpai.service.ChatHandler;
 import com.yizhaoqi.smartpai.service.DocumentService;
 import com.yizhaoqi.smartpai.utils.LogUtils;
@@ -20,6 +24,8 @@ import org.springframework.web.bind.annotation.*;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +47,12 @@ public class DocumentController {
     
     @Autowired
     private OrganizationTagRepository organizationTagRepository;
+
+    @Autowired
+    private PatentDocumentRepository patentDocumentRepository;
+
+    @Autowired
+    private ObjectMapper objectMapper;
     
     @Autowired
     private JwtUtils jwtUtils;
@@ -194,6 +206,7 @@ public class DocumentController {
     }
 
     private List<Map<String, Object>> convertFilesToResponse(List<FileUpload> files) {
+        Map<Long, PatentDocument> patentDocumentByUploadId = loadPatentDocumentsByUploadId(files);
         return files.stream().map(file -> {
             Map<String, Object> dto = new HashMap<>();
             dto.put("fileMd5", file.getFileMd5());
@@ -212,6 +225,7 @@ public class DocumentController {
             dto.put("actualChunkCount", file.getActualChunkCount());
             dto.put("documentType", file.getDocumentType());
             dto.put("orgTagName", getOrgTagName(file.getOrgTag()));
+            dto.put("patentParseQuality", buildPatentParseQuality(patentDocumentByUploadId.get(file.getId())));
             return dto;
         }).collect(Collectors.toList());
     }
@@ -698,6 +712,7 @@ public class DocumentController {
         payload.put("fileMd5", file.getFileMd5());
         payload.put("fileSize", file.getTotalSize());
         payload.put("previewType", previewType);
+        payload.put("patentParseQuality", buildPatentParseQuality(resolvePatentDocument(file)));
 
         if ("text".equals(previewType)) {
             String previewContent = documentService.getFilePreviewContent(file.getFileMd5(), fileName);
@@ -735,6 +750,102 @@ public class DocumentController {
 
         payload.put("previewUrl", previewUrl);
         return payload;
+    }
+
+    private Map<Long, PatentDocument> loadPatentDocumentsByUploadId(List<FileUpload> files) {
+        if (files == null || files.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        List<Long> uploadIds = files.stream()
+                .map(FileUpload::getId)
+                .filter(id -> id != null)
+                .distinct()
+                .collect(Collectors.toList());
+        if (uploadIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        try {
+            return patentDocumentRepository.findByUploadIdIn(uploadIds).stream()
+                    .collect(Collectors.toMap(
+                            PatentDocument::getUploadId,
+                            document -> document,
+                            (first, second) -> first
+                    ));
+        } catch (Exception e) {
+            LogUtils.logBusinessError("PATENT_QUALITY_RESPONSE", "system", "批量查询专利解析质量失败", e);
+            return Collections.emptyMap();
+        }
+    }
+
+    private PatentDocument resolvePatentDocument(FileUpload file) {
+        if (file == null) {
+            return null;
+        }
+
+        try {
+            if (file.getId() != null) {
+                Optional<PatentDocument> byUploadId = patentDocumentRepository.findByUploadId(file.getId());
+                if (byUploadId.isPresent()) {
+                    return byUploadId.get();
+                }
+            }
+            return patentDocumentRepository
+                    .findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(file.getFileMd5(), file.getUserId())
+                    .orElse(null);
+        } catch (Exception e) {
+            LogUtils.logBusinessError("PATENT_QUALITY_RESPONSE", "system",
+                    "查询专利解析质量失败: fileMd5=%s", e, file.getFileMd5());
+            return null;
+        }
+    }
+
+    private Map<String, Object> buildPatentParseQuality(PatentDocument document) {
+        if (document == null || document.getQualityLevel() == null || document.getQualityLevel().isBlank()) {
+            return null;
+        }
+
+        Map<String, Object> quality = new HashMap<>();
+        quality.put("level", document.getQualityLevel());
+        quality.put("label", qualityLevelLabel(document.getQualityLevel()));
+        quality.put("issues", parseQualityIssues(document.getQualityIssuesJson()));
+        quality.put("overallScore", document.getOverallScore());
+        quality.put("metadataScore", document.getMetadataScore());
+        quality.put("claimScore", document.getClaimScore());
+        quality.put("sectionScore", document.getSectionScore());
+        quality.put("chunkScore", document.getChunkScore());
+        quality.put("ocrScore", document.getOcrScore());
+        quality.put("parseStatus", document.getParseStatus());
+        quality.put("parsedAt", document.getParsedAt());
+        return quality;
+    }
+
+    private String qualityLevelLabel(String qualityLevel) {
+        if (PatentDocument.QUALITY_EXCELLENT.equals(qualityLevel)) {
+            return "优秀";
+        }
+        if (PatentDocument.QUALITY_USABLE.equals(qualityLevel)) {
+            return "可用";
+        }
+        if (PatentDocument.QUALITY_NEEDS_REVIEW.equals(qualityLevel)) {
+            return "需复核";
+        }
+        return qualityLevel;
+    }
+
+    private List<String> parseQualityIssues(String qualityIssuesJson) {
+        if (qualityIssuesJson == null || qualityIssuesJson.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        try {
+            return objectMapper.readValue(qualityIssuesJson, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            List<String> fallback = new ArrayList<>();
+            fallback.add(qualityIssuesJson);
+            return fallback;
+        }
     }
 
     private String buildSinglePagePreviewUrl(String fileMd5, Integer pageNumber) {

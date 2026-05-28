@@ -105,10 +105,10 @@ public class EmbeddingClient {
             return new EmbeddingUsageResult(all, totalTokens, currentModelVersion());
         } catch (NonRetryableEmbeddingException e) {
             logger.error("API调用失败 - 状态码: {}, 响应: {}", e.statusCode, e.responseBody);
-            throw new RuntimeException(String.format(
+            throw new EmbeddingApiException(String.format(
                     "向量生成失败 - API错误: HTTP %d - %s",
                     e.statusCode,
-                    e.responseBody), e);
+                    e.responseBody), e.statusCode, e.responseBody, false, e);
         } catch (WebClientResponseException e) {
             // 提供详细的API响应错误信息
             logger.error("API调用失败 - 状态码: {}, 响应: {}, 请求头: {}",
@@ -129,6 +129,10 @@ public class EmbeddingClient {
 
     private String callApiOnce(List<String> batch) {
         ModelProviderConfigService.ActiveProviderView provider = modelProviderConfigService.getActiveProvider(ModelProviderConfigService.SCOPE_EMBEDDING);
+        if (isNativeMultimodalEmbeddingModel(provider.model())) {
+            return callNativeMultimodalApiOnce(provider, batch);
+        }
+
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", provider.model());
         requestBody.put("input", batch);
@@ -160,6 +164,42 @@ public class EmbeddingClient {
                 .block(Duration.ofSeconds(30));
     }
 
+    private String callNativeMultimodalApiOnce(ModelProviderConfigService.ActiveProviderView provider, List<String> batch) {
+        Map<String, Object> input = new HashMap<>();
+        List<Map<String, String>> contents = batch.stream()
+                .map(text -> Map.of("text", text == null ? "" : text))
+                .toList();
+        input.put("contents", contents);
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", provider.model());
+        requestBody.put("input", input);
+        if (provider.dimension() != null) {
+            requestBody.put("parameters", Map.of("dimension", provider.dimension()));
+        }
+
+        int maxChars = batch.stream().mapToInt(text -> text != null ? text.length() : 0).max().orElse(0);
+        int estimatedTokens = usageQuotaService.estimateEmbeddingTokens(batch);
+        logger.debug("发送原生多模态嵌入请求 - Provider: {}, 模型: {}, 维度: {}, 批次大小: {}, maxChars: {}, estimatedTokens: {}",
+                provider.provider(), provider.model(), provider.dimension(), batch.size(), maxChars, estimatedTokens);
+
+        return buildClient(nativeDashScopeBaseUrl(provider.apiBaseUrl())).post()
+                .uri("/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding")
+                .bodyValue(requestBody)
+                .retrieve()
+                .onStatus(status -> status.is4xxClientError() && status.value() != 429, response ->
+                        response.bodyToMono(String.class)
+                                .defaultIfEmpty("")
+                                .flatMap(body -> Mono.error(new NonRetryableEmbeddingException(
+                                        response.statusCode().value(), body))))
+                .bodyToMono(String.class)
+                .retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(1))
+                        .filter(this::isRetryableEmbeddingError)
+                        .doBeforeRetry(signal -> logger.warn("重试原生多模态嵌入调用 - 尝试: {}, 错误: {}",
+                                signal.totalRetries() + 1, signal.failure().getMessage())))
+                .block(Duration.ofSeconds(30));
+    }
+
     private boolean isRetryableEmbeddingError(Throwable error) {
         if (error instanceof NonRetryableEmbeddingException) {
             return false;
@@ -172,13 +212,22 @@ public class EmbeddingClient {
     }
 
     private WebClient buildClient(ModelProviderConfigService.ActiveProviderView provider) {
+        return buildClient(provider.apiBaseUrl(), provider.apiKey());
+    }
+
+    private WebClient buildClient(String apiBaseUrl) {
+        ModelProviderConfigService.ActiveProviderView provider = modelProviderConfigService.getActiveProvider(ModelProviderConfigService.SCOPE_EMBEDDING);
+        return buildClient(apiBaseUrl, provider.apiKey());
+    }
+
+    private WebClient buildClient(String apiBaseUrl, String apiKey) {
         WebClient.Builder builder = WebClient.builder()
-                .baseUrl(provider.apiBaseUrl())
+                .baseUrl(apiBaseUrl)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 // WebClient 的默认缓冲区大小限制（256KB）, 这里调高到 16MB
                 .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024));
-        if (provider.apiKey() != null && !provider.apiKey().isBlank()) {
-            builder.defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + provider.apiKey());
+        if (apiKey != null && !apiKey.isBlank()) {
+            builder.defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
         }
         return builder.build();
     }
@@ -186,10 +235,21 @@ public class EmbeddingClient {
     private EmbeddingApiResponse parseEmbeddingResponse(String response, List<String> inputTexts) throws Exception {
         JsonNode jsonNode = objectMapper.readTree(response);
         JsonNode data = jsonNode.get("data");  // 兼容模式下使用data字段
-        if (data == null || !data.isArray()) {
-            throw new RuntimeException("API 响应格式错误: data 字段不存在或不是数组");
+        if (data != null && data.isArray()) {
+            return parseOpenAiCompatibleEmbeddingResponse(jsonNode, data, inputTexts);
         }
-        
+
+        JsonNode nativeEmbeddings = jsonNode.path("output").path("embeddings");
+        if (nativeEmbeddings.isArray()) {
+            return parseNativeMultimodalEmbeddingResponse(jsonNode, nativeEmbeddings, inputTexts);
+        }
+
+        throw new RuntimeException("API 响应格式错误: 未找到 data 或 output.embeddings 数组");
+    }
+
+    private EmbeddingApiResponse parseOpenAiCompatibleEmbeddingResponse(JsonNode jsonNode,
+                                                                       JsonNode data,
+                                                                       List<String> inputTexts) {
         List<float[]> vectors = new ArrayList<>();
         for (JsonNode item : data) {
             JsonNode embedding = item.get("embedding");
@@ -207,6 +267,53 @@ public class EmbeddingClient {
         return new EmbeddingApiResponse(vectors, totalTokens > 0 ? totalTokens : usageQuotaService.estimateEmbeddingTokens(inputTexts));
     }
 
+    private EmbeddingApiResponse parseNativeMultimodalEmbeddingResponse(JsonNode jsonNode,
+                                                                        JsonNode embeddings,
+                                                                        List<String> inputTexts) {
+        int statusCode = jsonNode.path("status_code").asInt(200);
+        if (statusCode != 200) {
+            throw new RuntimeException("原生多模态嵌入 API 响应失败: " + jsonNode);
+        }
+
+        List<float[]> vectors = new ArrayList<>();
+        for (JsonNode item : embeddings) {
+            JsonNode embedding = item.get("embedding");
+            if (embedding != null && embedding.isArray()) {
+                float[] vector = new float[embedding.size()];
+                for (int i = 0; i < embedding.size(); i++) {
+                    vector[i] = (float) embedding.get(i).asDouble();
+                }
+                vectors.add(vector);
+            }
+        }
+
+        JsonNode usage = jsonNode.path("usage");
+        int totalTokens = usage.path("total_tokens").asInt(usage.path("input_tokens").asInt(0));
+        return new EmbeddingApiResponse(vectors, totalTokens > 0 ? totalTokens : usageQuotaService.estimateEmbeddingTokens(inputTexts));
+    }
+
+    private boolean isNativeMultimodalEmbeddingModel(String model) {
+        return "qwen3-vl-embedding".equalsIgnoreCase(model);
+    }
+
+    private String nativeDashScopeBaseUrl(String apiBaseUrl) {
+        String value = apiBaseUrl == null || apiBaseUrl.isBlank()
+                ? "https://dashscope.aliyuncs.com"
+                : apiBaseUrl.trim();
+        int compatibleModeIndex = value.indexOf("/compatible-mode");
+        if (compatibleModeIndex >= 0) {
+            return value.substring(0, compatibleModeIndex);
+        }
+        int apiV1Index = value.indexOf("/api/v1");
+        if (apiV1Index >= 0) {
+            return value.substring(0, apiV1Index);
+        }
+        while (value.endsWith("/") && value.length() > "https://".length()) {
+            value = value.substring(0, value.length() - 1);
+        }
+        return value;
+    }
+
     public String currentModelVersion() {
         ModelProviderConfigService.ActiveProviderView provider = modelProviderConfigService.getActiveProvider(ModelProviderConfigService.SCOPE_EMBEDDING);
         return provider.provider() + ":" + provider.model() + ":" + provider.dimension();
@@ -216,6 +323,35 @@ public class EmbeddingClient {
     }
 
     public record EmbeddingUsageResult(List<float[]> vectors, int totalTokens, String modelVersion) {
+    }
+
+    public static class EmbeddingApiException extends RuntimeException {
+        private final int statusCode;
+        private final String responseBody;
+        private final boolean retryable;
+
+        public EmbeddingApiException(String message,
+                                     int statusCode,
+                                     String responseBody,
+                                     boolean retryable,
+                                     Throwable cause) {
+            super(message, cause);
+            this.statusCode = statusCode;
+            this.responseBody = responseBody;
+            this.retryable = retryable;
+        }
+
+        public int getStatusCode() {
+            return statusCode;
+        }
+
+        public String getResponseBody() {
+            return responseBody;
+        }
+
+        public boolean isRetryable() {
+            return retryable;
+        }
     }
 
     private static class NonRetryableEmbeddingException extends RuntimeException {

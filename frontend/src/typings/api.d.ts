@@ -320,6 +320,20 @@ declare namespace Api {
   }
 
   namespace KnowledgeBase {
+    interface PatentParseQuality {
+      level: 'EXCELLENT' | 'USABLE' | 'NEEDS_REVIEW' | string;
+      label: string;
+      issues: string[];
+      overallScore?: number | null;
+      metadataScore?: number | null;
+      claimScore?: number | null;
+      sectionScore?: number | null;
+      chunkScore?: number | null;
+      ocrScore?: number | null;
+      parseStatus?: string | null;
+      parsedAt?: string | null;
+    }
+
     interface SearchParams {
       userId: string;
       query: string;
@@ -367,6 +381,8 @@ declare namespace Api {
       estimatedChunkCount?: number;
       actualEmbeddingTokens?: number;
       actualChunkCount?: number;
+      documentType?: 'GENERAL' | 'PATENT' | string;
+      patentParseQuality?: PatentParseQuality | null;
       createdAt?: string;
       mergedAt?: string;
       requestIds?: string[]; // 请求ID，用于取消上传
@@ -431,6 +447,19 @@ declare namespace Api {
   }
 
   namespace Document {
+    interface PreviewResponse {
+      fileName: string;
+      fileSize: number;
+      fileMd5?: string;
+      content?: string;
+      previewUrl?: string;
+      sourceUrl?: string;
+      singlePageMode?: boolean;
+      sourcePageNumber?: number;
+      previewType?: 'pdf' | 'image' | 'text' | 'download';
+      patentParseQuality?: KnowledgeBase.PatentParseQuality | null;
+    }
+
     interface DownloadResponse {
       fileName: string;
       downloadUrl: string;

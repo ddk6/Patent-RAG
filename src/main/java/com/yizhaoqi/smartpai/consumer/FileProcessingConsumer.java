@@ -1,5 +1,6 @@
 package com.yizhaoqi.smartpai.consumer;
 
+import com.yizhaoqi.smartpai.client.EmbeddingClient;
 import com.yizhaoqi.smartpai.config.KafkaConfig;
 import com.yizhaoqi.smartpai.config.MinerUProperties;
 import com.yizhaoqi.smartpai.config.PatentParserProperties;
@@ -99,6 +100,11 @@ public class FileProcessingConsumer {
         } catch (Exception e) {
             log.error("[Patent] 专利解析失败: fileMd5={}", task.getFileMd5(), e);
             updateParseStatus(task, "FAILED", "PATENT");
+            if (isNonRetryableProcessingError(e)) {
+                log.warn("[Patent] 不可重试的专利处理错误，已标记失败并确认 Kafka 消息: fileMd5={}, reason={}",
+                        task.getFileMd5(), rootMessage(e));
+                return;
+            }
             throw new RuntimeException("Patent document processing failed", e);
         }
     }
@@ -340,6 +346,28 @@ public class FileProcessingConsumer {
                 .findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(task.getFileMd5(), task.getUserId())
                 .map(fileUpload -> "COMPLETED".equalsIgnoreCase(fileUpload.getParseStatus()))
                 .orElse(false);
+    }
+
+    private boolean isNonRetryableProcessingError(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof EmbeddingClient.EmbeddingApiException embeddingApiException
+                    && !embeddingApiException.isRetryable()) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private String rootMessage(Throwable error) {
+        Throwable current = error;
+        Throwable root = error;
+        while (current != null) {
+            root = current;
+            current = current.getCause();
+        }
+        return root != null ? root.getMessage() : "unknown";
     }
 
     /**

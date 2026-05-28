@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -13,6 +14,8 @@ import java.util.Optional;
 public interface PatentDocumentRepository extends JpaRepository<PatentDocument, Long> {
 
     Optional<PatentDocument> findByUploadId(Long uploadId);
+
+    List<PatentDocument> findByUploadIdIn(Collection<Long> uploadIds);
 
     Optional<PatentDocument> findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(String fileMd5, String userId);
 

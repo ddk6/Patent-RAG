@@ -1,6 +1,6 @@
 <script setup lang="tsx">
 import type { UploadFileInfo } from 'naive-ui';
-import { NButton, NEllipsis, NModal, NPopconfirm, NProgress, NTag, NUpload } from 'naive-ui';
+import { NButton, NEllipsis, NModal, NPopconfirm, NProgress, NTag, NTooltip, NUpload } from 'naive-ui';
 import { uploadAccept } from '@/constants/common';
 import { fakePaginationRequest } from '@/service/request';
 import { UploadStatus } from '@/enum';
@@ -32,6 +32,47 @@ function renderIcon(fileName: string) {
     return <SvgIcon localIcon="dflt" class="mx-4 text-12" />;
   }
   return null;
+}
+
+function getQualityTagType(level?: string) {
+  if (level === 'EXCELLENT') return 'success';
+  if (level === 'USABLE') return 'info';
+  if (level === 'NEEDS_REVIEW') return 'warning';
+  return 'default';
+}
+
+function renderPatentParseQuality(row: Api.KnowledgeBase.UploadTask) {
+  const quality = row.patentParseQuality;
+  if (!quality) {
+    return <span class="text-xs text-stone-400">-</span>;
+  }
+
+  const label = quality.label || quality.level;
+  const scoreLabel = typeof quality.overallScore === 'number' ? ` / ${(quality.overallScore * 100).toFixed(0)}分` : '';
+  const issues = quality.issues?.filter(Boolean) || [];
+  const tag = (
+    <NTag size="small" type={getQualityTagType(quality.level)} bordered={false}>
+      {label}
+      {scoreLabel}
+    </NTag>
+  );
+
+  if (!issues.length) return tag;
+
+  return (
+    <NTooltip trigger="hover" placement="top">
+      {{
+        trigger: () => tag,
+        default: () => (
+          <div class="max-w-320px text-xs leading-5">
+            {issues.map(issue => (
+              <div>{issue}</div>
+            ))}
+          </div>
+        )
+      }}
+    </NTooltip>
+  );
 }
 
 // 处理文件预览
@@ -114,6 +155,12 @@ const { columns, columnChecks, data, getData, loading } = useTable({
       render: row => renderStatus(row.status, row.progress)
     },
     {
+      key: 'patentParseQuality',
+      title: '解析质量',
+      width: 120,
+      render: row => renderPatentParseQuality(row)
+    },
+    {
       key: 'orgTagName',
       title: '组织标签',
       width: 150,
@@ -185,7 +232,9 @@ function syncTaskFromServer(target: Api.KnowledgeBase.UploadTask, source: Api.Kn
     estimatedEmbeddingTokens: source.estimatedEmbeddingTokens,
     estimatedChunkCount: source.estimatedChunkCount,
     actualEmbeddingTokens: source.actualEmbeddingTokens,
-    actualChunkCount: source.actualChunkCount
+    actualChunkCount: source.actualChunkCount,
+    documentType: source.documentType,
+    patentParseQuality: source.patentParseQuality
   });
 }
 

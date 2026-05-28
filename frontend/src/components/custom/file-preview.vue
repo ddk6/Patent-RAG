@@ -78,6 +78,22 @@
               </div>
             </section>
 
+            <section v-if="patentParseQuality" class="info-card">
+              <div class="quality-header">
+                <span class="info-label">专利解析质量</span>
+                <NTag size="small" :type="qualityTagType" :bordered="false">
+                  {{ qualityDisplayLabel }}
+                </NTag>
+              </div>
+              <p v-if="qualityScoreLine" class="support-copy">{{ qualityScoreLine }}</p>
+              <div v-if="qualityIssues.length" class="quality-issues">
+                <span class="info-label">问题原因</span>
+                <ul>
+                  <li v-for="issue in qualityIssues" :key="issue">{{ issue }}</li>
+                </ul>
+              </div>
+            </section>
+
             <section v-if="evidenceSnippet" class="info-card">
               <span class="info-label">线索</span>
               <p class="support-copy">{{ evidenceSnippet }}</p>
@@ -152,7 +168,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { NButton, NSpin } from 'naive-ui';
+import { NButton, NSpin, NTag } from 'naive-ui';
 import { request } from '@/service/request';
 import { getFileExt } from '@/utils/common';
 import { getServiceBaseURL } from '@/utils/service';
@@ -191,6 +207,7 @@ const previewUrl = ref('');
 const sourceUrl = ref('');
 const singlePageMode = ref(false);
 const sourcePageNumber = ref<number | undefined>(undefined);
+const patentParseQuality = ref<Api.KnowledgeBase.PatentParseQuality | null>(null);
 const isHttpProxy = import.meta.env.DEV && import.meta.env.VITE_HTTP_PROXY === 'Y';
 const { baseURL: serviceBaseUrl } = getServiceBaseURL(import.meta.env, isHttpProxy);
 
@@ -225,6 +242,23 @@ const displayScore = computed(() => {
 const displayPage = computed(() => sourcePageNumber.value || props.pageNumber || undefined);
 const displayPageLabel = computed(() => (displayPage.value ? `第 ${displayPage.value} 页` : ''));
 const displayScoreLabel = computed(() => (displayScore.value ? `相关分数 ${displayScore.value}` : ''));
+const qualityTagType = computed(() => {
+  if (patentParseQuality.value?.level === 'EXCELLENT') return 'success';
+  if (patentParseQuality.value?.level === 'USABLE') return 'info';
+  if (patentParseQuality.value?.level === 'NEEDS_REVIEW') return 'warning';
+  return 'default';
+});
+const qualityDisplayLabel = computed(() => {
+  const quality = patentParseQuality.value;
+  if (!quality) return '';
+  return quality.label || quality.level;
+});
+const qualityScoreLine = computed(() => {
+  const score = patentParseQuality.value?.overallScore;
+  if (typeof score !== 'number' || Number.isNaN(score)) return '';
+  return `综合评分 ${(score * 100).toFixed(0)} 分`;
+});
+const qualityIssues = computed(() => patentParseQuality.value?.issues?.filter(Boolean) || []);
 const headerMetaLine = computed(() => {
   if (previewType.value === 'pdf') {
     return [displayPageLabel.value, displayScore.value ? `分数 ${displayScore.value}` : ''].filter(Boolean).join(' / ');
@@ -327,6 +361,7 @@ async function loadPreviewContent() {
   sourceUrl.value = '';
   singlePageMode.value = false;
   sourcePageNumber.value = undefined;
+  patentParseQuality.value = null;
   previewType.value = 'text';
 
   try {
@@ -338,17 +373,7 @@ async function loadPreviewContent() {
         pageNumber: props.pageNumber
       });
 
-      const { error: requestError, data } = await request<{
-        fileName: string;
-        fileSize: number;
-        fileMd5?: string;
-        content?: string;
-        previewUrl?: string;
-        sourceUrl?: string;
-        singlePageMode?: boolean;
-        sourcePageNumber?: number;
-        previewType?: 'pdf' | 'image' | 'text' | 'download';
-      }>({
+      const { error: requestError, data } = await request<Api.Document.PreviewResponse>({
         url: '/documents/preview',
         params: {
           fileName: props.fileName,
@@ -374,6 +399,7 @@ async function loadPreviewContent() {
         sourceUrl.value = data.sourceUrl || data.previewUrl || '';
         singlePageMode.value = Boolean(data.singlePageMode);
         sourcePageNumber.value = data.sourcePageNumber || props.pageNumber;
+        patentParseQuality.value = data.patentParseQuality || null;
       }
     } else {
       // 降级：使用文件名预览（向后兼容）
@@ -382,17 +408,7 @@ async function loadPreviewContent() {
         pageNumber: props.pageNumber
       });
 
-      const { error: requestError, data } = await request<{
-        fileName: string;
-        fileSize: number;
-        fileMd5?: string;
-        content?: string;
-        previewUrl?: string;
-        sourceUrl?: string;
-        singlePageMode?: boolean;
-        sourcePageNumber?: number;
-        previewType?: 'pdf' | 'image' | 'text' | 'download';
-      }>({
+      const { error: requestError, data } = await request<Api.Document.PreviewResponse>({
         url: '/documents/preview',
         params: {
           fileName: props.fileName,
@@ -417,6 +433,7 @@ async function loadPreviewContent() {
         sourceUrl.value = data.sourceUrl || data.previewUrl || '';
         singlePageMode.value = Boolean(data.singlePageMode);
         sourcePageNumber.value = data.sourcePageNumber || props.pageNumber;
+        patentParseQuality.value = data.patentParseQuality || null;
       }
     }
   } catch (err: any) {
@@ -626,6 +643,22 @@ function closePreview() {
 
     .info-inline-block {
       @apply mt-4 rounded-12px bg-primary/4 px-4 py-3;
+    }
+
+    .quality-header {
+      @apply flex items-center justify-between gap-3;
+    }
+
+    .quality-issues {
+      @apply mt-4;
+    }
+
+    .quality-issues ul {
+      @apply m-0 mt-3 list-disc pl-5 text-sm leading-6 text-stone-600;
+    }
+
+    .quality-issues li {
+      overflow-wrap: anywhere;
     }
 
     .spotlight-copy {
