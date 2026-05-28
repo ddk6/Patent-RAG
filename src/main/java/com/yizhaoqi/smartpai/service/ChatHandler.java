@@ -429,8 +429,13 @@ public class ChatHandler {
         try {
             PatentSearchRequest request = new PatentSearchRequest();
             request.setQuery(userMessage);
-            if (isClaimEvidenceQuestion(userMessage)) {
+            boolean claimEvidenceQuestion = isClaimEvidenceQuestion(userMessage);
+            if (claimEvidenceQuestion) {
                 request.setTopK(20);
+                request.setSourceType("CLAIM");
+                if (isIndependentClaimQuestion(userMessage)) {
+                    request.setIndependentClaimOnly(true);
+                }
             } else {
                 request.setTopK(8);
             }
