@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -38,10 +39,13 @@ class PatentParseQualityEvaluatorTest {
                 chunk("ABSTRACT", metadata.getAbstractText()),
                 chunk("CLAIM", claim1.getText()),
                 chunk("CLAIM", claim2.getText()),
-                chunk("DESCRIPTION", "技术领域\n本发明涉及数据处理技术领域，尤其涉及一种适用于企业系统的数据处理方法。")
+                chunk("DESCRIPTION", "技术领域\n" + "本发明涉及数据处理技术领域，尤其涉及一种适用于企业系统的数据处理方法。".repeat(8))
         ));
 
-        assertTrue(evaluator.evaluate(result).acceptable());
+        PatentParseQualityEvaluator.Evaluation evaluation = evaluator.evaluate(result);
+        assertTrue(evaluation.acceptable());
+        assertEquals("EXCELLENT", evaluation.qualityLevel());
+        assertTrue(evaluation.scores().claimScore() > 0.8d);
     }
 
     @Test
@@ -53,6 +57,31 @@ class PatentParseQualityEvaluatorTest {
         result.setChunks(List.of(chunk("BIBLIOGRAPHIC", "名称: 一种装置")));
 
         assertFalse(evaluator.evaluate(result).acceptable());
+    }
+
+    @Test
+    void marksMissingClaimsAsNeedsReview() {
+        PatentParserResult result = new PatentParserResult();
+        PatentParserResult.PatentMetadata metadata = new PatentParserResult.PatentMetadata();
+        metadata.setApplicationNumber("202310587525.9");
+        metadata.setPublicationNumber("CN116000000A");
+        metadata.setTitle("一种数据处理方法");
+        metadata.setApplicant("某某科技有限公司");
+        metadata.setAbstractText("本发明涉及一种数据处理方法，可以提升处理效率。");
+        result.setMetadata(metadata);
+        result.setSections(List.of(section("TECHNICAL_FIELD"), section("BACKGROUND")));
+        result.setChunks(List.of(
+                chunk("BIBLIOGRAPHIC", "申请号: 202310587525.9\n公开号: CN116000000A\n名称: 一种数据处理方法"),
+                chunk("ABSTRACT", metadata.getAbstractText()),
+                chunk("DESCRIPTION", "背景技术\n" + "现有系统中存在数据处理效率低和人工复核成本高的问题。".repeat(10))
+        ));
+
+        PatentParseQualityEvaluator.Evaluation evaluation = evaluator.evaluate(result);
+
+        assertFalse(evaluation.acceptable());
+        assertEquals("NEEDS_REVIEW", evaluation.qualityLevel());
+        assertTrue(evaluation.reasons().stream().anyMatch(reason -> reason.contains("claims too few")));
+        assertEquals(0.0d, evaluation.scores().claimScore());
     }
 
     private PatentParserResult.PatentClaimItem claim(int claimNo, boolean independent, String text) {

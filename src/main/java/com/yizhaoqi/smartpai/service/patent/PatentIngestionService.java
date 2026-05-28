@@ -15,11 +15,11 @@ import com.yizhaoqi.smartpai.repository.patent.PatentClaimRepository;
 import com.yizhaoqi.smartpai.repository.patent.PatentDocumentRepository;
 import com.yizhaoqi.smartpai.repository.patent.PatentSectionRepository;
 import com.yizhaoqi.smartpai.service.patent.dto.PatentParserResult;
+import com.yizhaoqi.smartpai.utils.TextEncodingRepairUtil;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -48,6 +48,7 @@ public class PatentIngestionService {
     private final PatentClaimRepository patentClaimRepository;
     private final PatentClaimElementRepository patentClaimElementRepository;
     private final PatentChunkRepository patentChunkRepository;
+    private final PatentParseQualityEvaluator patentParseQualityEvaluator;
     private final ObjectMapper objectMapper;
 
     public PatentIngestionService(PatentDocumentRepository patentDocumentRepository,
@@ -55,12 +56,14 @@ public class PatentIngestionService {
                                   PatentClaimRepository patentClaimRepository,
                                   PatentClaimElementRepository patentClaimElementRepository,
                                   PatentChunkRepository patentChunkRepository,
+                                  PatentParseQualityEvaluator patentParseQualityEvaluator,
                                   ObjectMapper objectMapper) {
         this.patentDocumentRepository = patentDocumentRepository;
         this.patentSectionRepository = patentSectionRepository;
         this.patentClaimRepository = patentClaimRepository;
         this.patentClaimElementRepository = patentClaimElementRepository;
         this.patentChunkRepository = patentChunkRepository;
+        this.patentParseQualityEvaluator = patentParseQualityEvaluator;
         this.objectMapper = objectMapper;
     }
 
@@ -86,6 +89,7 @@ public class PatentIngestionService {
         document.setParseStatus(PatentDocument.STATUS_PROCESSING);
         document.setParseError(null);
         document.setParsedAt(null);
+        resetParseQuality(document);
 
         return patentDocumentRepository.save(document);
     }
@@ -96,6 +100,7 @@ public class PatentIngestionService {
                 .orElseThrow(() -> new IllegalArgumentException("Patent document not found: " + patentId));
 
         applyMetadata(document, result.getMetadata());
+        applyParseQuality(document, result);
         document.setRawParserResultJson(toJson(result));
         document.setParserVersion(result.getParserVersion() != null ? result.getParserVersion() : PARSER_VERSION);
         document.setParseStatus(PatentDocument.STATUS_COMPLETED);
@@ -109,6 +114,42 @@ public class PatentIngestionService {
         saveChunks(savedDocument.getId(), result.getChunks(), result.getClaims(), claimIdByNo, sectionIdByOrder);
 
         return savedDocument;
+    }
+
+    private void applyParseQuality(PatentDocument document, PatentParserResult result) {
+        PatentParseQualityEvaluator.Evaluation evaluation = patentParseQualityEvaluator.evaluate(result);
+        PatentParseQualityEvaluator.ComponentScores scores = evaluation.scores();
+        document.setMetadataScore(roundScore(scores.metadataScore()));
+        document.setClaimScore(roundScore(scores.claimScore()));
+        document.setSectionScore(roundScore(scores.sectionScore()));
+        document.setChunkScore(roundScore(scores.chunkScore()));
+        document.setOcrScore(roundScore(scores.ocrScore()));
+        document.setOverallScore(roundScore(scores.overallScore()));
+        document.setQualityLevel(evaluation.qualityLevel());
+
+        List<String> issues = new ArrayList<>(evaluation.reasons());
+        if (result != null && result.getWarnings() != null) {
+            result.getWarnings().stream()
+                    .filter(warning -> warning != null && !warning.isBlank())
+                    .map(warning -> "parser warning: " + warning)
+                    .forEach(issues::add);
+        }
+        document.setQualityIssuesJson(toJson(issues));
+    }
+
+    private void resetParseQuality(PatentDocument document) {
+        document.setMetadataScore(null);
+        document.setClaimScore(null);
+        document.setSectionScore(null);
+        document.setChunkScore(null);
+        document.setOcrScore(null);
+        document.setOverallScore(null);
+        document.setQualityLevel(null);
+        document.setQualityIssuesJson(null);
+    }
+
+    private Double roundScore(double value) {
+        return Math.round(value * 1000.0d) / 1000.0d;
     }
 
     private void applyMetadata(PatentDocument document, PatentParserResult.PatentMetadata metadata) {
@@ -473,23 +514,6 @@ public class PatentIngestionService {
     }
 
     private String repairMojibake(String value) {
-        if (value == null || value.isBlank() || !looksLikeUtf8Mojibake(value)) {
-            return value;
-        }
-        try {
-            return new String(value.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8);
-        } catch (Exception ignored) {
-            return value;
-        }
-    }
-
-    private boolean looksLikeUtf8Mojibake(String value) {
-        return value.indexOf('å') >= 0
-                || value.indexOf('ç') >= 0
-                || value.indexOf('è') >= 0
-                || value.indexOf('é') >= 0
-                || value.indexOf('ä') >= 0
-                || value.indexOf('æ') >= 0
-                || value.indexOf('ã') >= 0;
+        return TextEncodingRepairUtil.repairMojibake(value);
     }
 }

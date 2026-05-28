@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS patent_documents (
                                                 parse_status VARCHAR(20) NOT NULL DEFAULT 'PENDING' COMMENT '解析状态：PENDING/PROCESSING/COMPLETED/FAILED',
                                                 parse_error TEXT COMMENT '解析错误信息',
                                                 parsed_at TIMESTAMP NULL DEFAULT NULL COMMENT '解析完成时间',
+                                                metadata_score DOUBLE DEFAULT NULL COMMENT '著录项解析质量分',
+                                                claim_score DOUBLE DEFAULT NULL COMMENT '权利要求解析质量分',
+                                                section_score DOUBLE DEFAULT NULL COMMENT '说明书章节解析质量分',
+                                                chunk_score DOUBLE DEFAULT NULL COMMENT '检索块解析质量分',
+                                                ocr_score DOUBLE DEFAULT NULL COMMENT '文本/OCR可用性质量分',
+                                                overall_score DOUBLE DEFAULT NULL COMMENT '综合解析质量分',
+                                                quality_level VARCHAR(30) DEFAULT NULL COMMENT '解析质量等级：EXCELLENT/USABLE/NEEDS_REVIEW',
+                                                quality_issues_json JSON DEFAULT NULL COMMENT '解析质量问题列表 JSON',
                                                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                                                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
                                                 UNIQUE KEY uk_patent_documents_upload (upload_id),
@@ -47,6 +55,7 @@ CREATE TABLE IF NOT EXISTS patent_documents (
                                                 INDEX idx_patent_documents_application_no (application_no),
                                                 INDEX idx_patent_documents_title (title),
                                                 INDEX idx_patent_documents_applicant (applicant(255)),
+                                                INDEX idx_patent_documents_quality_level (quality_level),
                                                 CONSTRAINT fk_patent_documents_upload FOREIGN KEY (upload_id) REFERENCES file_upload(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='专利结构化文档表';
 

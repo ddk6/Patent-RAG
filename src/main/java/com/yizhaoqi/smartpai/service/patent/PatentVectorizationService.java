@@ -8,6 +8,7 @@ import com.yizhaoqi.smartpai.repository.patent.PatentChunkRepository;
 import com.yizhaoqi.smartpai.repository.patent.PatentDocumentRepository;
 import com.yizhaoqi.smartpai.service.ElasticsearchService;
 import com.yizhaoqi.smartpai.service.UsageQuotaService;
+import com.yizhaoqi.smartpai.utils.TextEncodingRepairUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -133,7 +134,7 @@ public class PatentVectorizationService {
         if (text == null) {
             return "";
         }
-        return text.trim()
+        return TextEncodingRepairUtil.repairMojibake(text).trim()
                 .replaceAll("[\\p{Cntrl}&&[^\r\n\t]]", "")
                 .replaceAll("\\s+", " ");
     }
@@ -196,17 +197,17 @@ public class PatentVectorizationService {
                 buildEsDocumentId(patentDocument.getId(), chunk.getId(), unit.partIndex(), unit.totalParts()),
                 patentDocument.getId(),
                 chunk.getId(),
-                patentDocument.getFileMd5(),
-                patentDocument.getFileName(),
+                TextEncodingRepairUtil.repairMojibake(patentDocument.getFileMd5()),
+                TextEncodingRepairUtil.repairMojibake(patentDocument.getFileName()),
                 chunk.getChunkNo(),
                 unit.text(),
-                chunk.getSourceType(),
+                TextEncodingRepairUtil.repairMojibake(chunk.getSourceType()),
                 chunk.getSourceId(),
                 chunk.getClaimNo(),
                 chunk.isIndependentClaim(),
-                chunk.getSectionPath(),
+                TextEncodingRepairUtil.repairMojibake(chunk.getSectionPath()),
                 chunk.getPageNumber(),
-                chunk.getAnchorText(),
+                TextEncodingRepairUtil.repairMojibake(chunk.getAnchorText()),
                 vector,
                 modelVersion,
                 patentDocument.getUserId(),
@@ -214,9 +215,9 @@ public class PatentVectorizationService {
                 patentDocument.isPublic(),
                 patentDocument.getPublicationNo(),
                 patentDocument.getApplicationNo(),
-                patentDocument.getTitle(),
-                patentDocument.getApplicant(),
-                patentDocument.getPatentType(),
+                TextEncodingRepairUtil.repairMojibake(patentDocument.getTitle()),
+                TextEncodingRepairUtil.repairMojibake(patentDocument.getApplicant()),
+                TextEncodingRepairUtil.repairMojibake(patentDocument.getPatentType()),
                 formatDate(patentDocument.getPublicationDate()),
                 formatDate(patentDocument.getApplicationDate())
         );

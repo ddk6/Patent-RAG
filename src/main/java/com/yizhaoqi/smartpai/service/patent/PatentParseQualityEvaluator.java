@@ -1,6 +1,7 @@
 package com.yizhaoqi.smartpai.service.patent;
 
 import com.yizhaoqi.smartpai.config.PatentParserProperties;
+import com.yizhaoqi.smartpai.model.patent.PatentDocument;
 import com.yizhaoqi.smartpai.service.patent.dto.PatentParserResult;
 import org.springframework.stereotype.Component;
 
@@ -26,7 +27,9 @@ public class PatentParseQualityEvaluator {
     public Evaluation evaluate(PatentParserResult result) {
         List<String> reasons = new ArrayList<>();
         if (result == null) {
-            return new Evaluation(false, 0.0d, List.of("parser result is null"));
+            ComponentScores scores = new ComponentScores(0.0d, 0.0d, 0.0d, 0.0d, 0.0d, 0.0d);
+            return new Evaluation(false, 0.0d, List.of("parser result is null"), scores,
+                    PatentDocument.QUALITY_NEEDS_REVIEW);
         }
 
         PatentParserResult.PatentMetadata metadata = result.getMetadata();
@@ -34,6 +37,7 @@ public class PatentParseQualityEvaluator {
         int claims = result.getClaims() != null ? result.getClaims().size() : 0;
         int chunks = result.getChunks() != null ? result.getChunks().size() : 0;
         int chunkTextChars = countChunkTextChars(result);
+        ComponentScores scores = componentScores(result, metadataSignals, chunks, chunkTextChars);
 
         if (metadataSignals < properties.getDirectMinMetadataSignals()) {
             reasons.add("metadata signals too weak: " + metadataSignals);
@@ -48,35 +52,63 @@ public class PatentParseQualityEvaluator {
             reasons.add("chunk text too short: " + chunkTextChars);
         }
 
-        double score = score(result, metadataSignals, claims, chunks, chunkTextChars);
+        double score = scores.overallScore();
         if (score < properties.getDirectQualityThreshold()) {
             reasons.add("score below threshold: " + round(score));
         }
 
-        return new Evaluation(reasons.isEmpty(), score, reasons);
+        return new Evaluation(reasons.isEmpty(), score, reasons, scores, qualityLevel(score, scores));
     }
 
-    private double score(PatentParserResult result,
-                         int metadataSignals,
-                         int claims,
-                         int chunks,
-                         int chunkTextChars) {
-        double score = 0.0d;
+    private ComponentScores componentScores(PatentParserResult result,
+                                            int metadataSignals,
+                                            int chunks,
+                                            int chunkTextChars) {
+        double metadataScore = metadataScore(metadataSignals);
+        double claimScore = claimScore(result);
+        double sectionScore = sectionScore(result);
+        double chunkScore = chunkScore(result, chunks, chunkTextChars);
+        double ocrScore = warningScore(result);
+        double overallScore = overallScore(metadataScore, claimScore, sectionScore, chunkScore, ocrScore, result);
+
+        return new ComponentScores(
+                metadataScore,
+                claimScore,
+                sectionScore,
+                chunkScore,
+                ocrScore,
+                overallScore
+        );
+    }
+
+    private double overallScore(double metadataScore,
+                                double claimScore,
+                                double sectionScore,
+                                double chunkScore,
+                                double ocrScore,
+                                PatentParserResult result) {
         PatentParserResult.PatentMetadata metadata = result.getMetadata();
 
-        score += Math.min(metadataSignals, 6) / 6.0d * 0.25d;
-        score += claimScore(result) * 0.35d;
-        score += structureScore(result, chunks, chunkTextChars) * 0.30d;
-        score += warningScore(result) * 0.10d;
+        double score = 0.0d;
+        score += metadataScore * 0.25d;
+        score += claimScore * 0.35d;
+        score += sectionScore * 0.20d;
+        score += chunkScore * 0.10d;
+        score += ocrScore * 0.10d;
 
         if (metadata != null && hasValue(metadata.getApplicationNumber()) && hasValue(metadata.getPublicationNumber())) {
             score += 0.03d;
         }
+        int claims = result.getClaims() != null ? result.getClaims().size() : 0;
         if (claims >= 5) {
             score += 0.03d;
         }
 
         return Math.min(1.0d, score);
+    }
+
+    private double metadataScore(int metadataSignals) {
+        return Math.min(metadataSignals, 6) / 6.0d;
     }
 
     private double claimScore(PatentParserResult result) {
@@ -133,31 +165,56 @@ public class PatentParseQualityEvaluator {
         return seen.contains(1) && ordered >= Math.max(1, result.getClaims().size() - 1);
     }
 
-    private double structureScore(PatentParserResult result, int chunks, int chunkTextChars) {
+    private double sectionScore(PatentParserResult result) {
         double score = 0.0d;
         PatentParserResult.PatentMetadata metadata = result.getMetadata();
         if (metadata != null && hasValue(metadata.getAbstractText())) {
-            score += 0.20d;
+            score += 0.25d;
         }
         int sections = result.getSections() != null ? result.getSections().size() : 0;
         if (sections >= 2) {
-            score += 0.25d;
+            score += 0.45d;
         } else if (sections == 1) {
-            score += 0.12d;
+            score += 0.22d;
         }
         if (hasSourceType(result, "BIBLIOGRAPHIC")) {
             score += 0.10d;
         }
+        if (hasSourceType(result, "DESCRIPTION")) {
+            score += 0.20d;
+        }
+        return Math.min(1.0d, score);
+    }
+
+    private double chunkScore(PatentParserResult result, int chunks, int chunkTextChars) {
+        double score = 0.0d;
+        if (chunks >= properties.getDirectMinChunks()) {
+            score += 0.40d;
+        } else if (chunks > 0) {
+            score += 0.20d;
+        }
+        if (chunkTextChars >= properties.getDirectMinChunkTextChars()) {
+            score += 0.40d;
+        } else if (chunkTextChars >= properties.getDirectMinChunkTextChars() / 2) {
+            score += 0.20d;
+        }
         if (hasSourceType(result, "CLAIM")) {
             score += 0.20d;
         }
-        if (hasSourceType(result, "DESCRIPTION")) {
-            score += 0.10d;
-        }
-        if (chunks >= properties.getDirectMinChunks() && chunkTextChars >= properties.getDirectMinChunkTextChars()) {
-            score += 0.15d;
-        }
         return Math.min(1.0d, score);
+    }
+
+    private String qualityLevel(double score, ComponentScores scores) {
+        if (scores.claimScore() == 0.0d || score < 0.55d) {
+            return PatentDocument.QUALITY_NEEDS_REVIEW;
+        }
+        if (score >= 0.85d) {
+            return PatentDocument.QUALITY_EXCELLENT;
+        }
+        if (score >= 0.70d) {
+            return PatentDocument.QUALITY_USABLE;
+        }
+        return PatentDocument.QUALITY_NEEDS_REVIEW;
     }
 
     private double warningScore(PatentParserResult result) {
@@ -211,6 +268,22 @@ public class PatentParseQualityEvaluator {
         return Math.round(value * 1000.0d) / 1000.0d;
     }
 
-    public record Evaluation(boolean acceptable, double score, List<String> reasons) {
+    public record ComponentScores(
+            double metadataScore,
+            double claimScore,
+            double sectionScore,
+            double chunkScore,
+            double ocrScore,
+            double overallScore
+    ) {
+    }
+
+    public record Evaluation(
+            boolean acceptable,
+            double score,
+            List<String> reasons,
+            ComponentScores scores,
+            String qualityLevel
+    ) {
     }
 }

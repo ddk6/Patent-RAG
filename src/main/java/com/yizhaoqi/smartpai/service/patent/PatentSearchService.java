@@ -14,12 +14,12 @@ import com.yizhaoqi.smartpai.repository.UserRepository;
 import com.yizhaoqi.smartpai.service.OrgTagCacheService;
 import com.yizhaoqi.smartpai.service.patent.dto.PatentSearchRequest;
 import com.yizhaoqi.smartpai.service.patent.dto.PatentSearchResult;
+import com.yizhaoqi.smartpai.utils.TextEncodingRepairUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -640,24 +640,7 @@ public class PatentSearchService {
     }
 
     private String repairMojibake(String value) {
-        if (value == null || value.isBlank() || !looksLikeUtf8Mojibake(value)) {
-            return value;
-        }
-        try {
-            return new String(value.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8);
-        } catch (Exception ignored) {
-            return value;
-        }
-    }
-
-    private boolean looksLikeUtf8Mojibake(String value) {
-        return value.indexOf('å') >= 0
-                || value.indexOf('ç') >= 0
-                || value.indexOf('è') >= 0
-                || value.indexOf('é') >= 0
-                || value.indexOf('ä') >= 0
-                || value.indexOf('æ') >= 0
-                || value.indexOf('ã') >= 0;
+        return TextEncodingRepairUtil.repairMojibake(value);
     }
 
     private List<String> getUserEffectiveOrgTags(String userId) {

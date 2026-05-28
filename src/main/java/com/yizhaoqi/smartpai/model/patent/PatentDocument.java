@@ -35,6 +35,10 @@ public class PatentDocument {
     public static final String STATUS_COMPLETED = "COMPLETED";
     public static final String STATUS_FAILED = "FAILED";
 
+    public static final String QUALITY_EXCELLENT = "EXCELLENT";
+    public static final String QUALITY_USABLE = "USABLE";
+    public static final String QUALITY_NEEDS_REVIEW = "NEEDS_REVIEW";
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -116,6 +120,30 @@ public class PatentDocument {
 
     @Column(name = "parsed_at")
     private LocalDateTime parsedAt;
+
+    @Column(name = "metadata_score")
+    private Double metadataScore;
+
+    @Column(name = "claim_score")
+    private Double claimScore;
+
+    @Column(name = "section_score")
+    private Double sectionScore;
+
+    @Column(name = "chunk_score")
+    private Double chunkScore;
+
+    @Column(name = "ocr_score")
+    private Double ocrScore;
+
+    @Column(name = "overall_score")
+    private Double overallScore;
+
+    @Column(name = "quality_level", length = 30)
+    private String qualityLevel;
+
+    @Column(name = "quality_issues_json", columnDefinition = "JSON")
+    private String qualityIssuesJson;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false)
