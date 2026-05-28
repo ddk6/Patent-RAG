@@ -1,0 +1,28 @@
+<svg width="300" height="300" viewBox="0 0 300 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">KnowLink icon</title>
+  <desc id="desc">A square KnowLink icon using a chat bubble and link motif.</desc>
+  <defs>
+    <linearGradient id="g1" x1="40" y1="40" x2="260" y2="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#10B981"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="78" y1="84" x2="222" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A7F3D0"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#065F46" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <rect x="32" y="32" width="236" height="236" rx="68" fill="#0F172A"/>
+    <path d="M88 84H180C204.301 84 224 103.699 224 128V156C224 180.301 204.301 200 180 200H151L124 228V200H88C63.6995 200 44 180.301 44 156V128C44 103.699 63.6995 84 88 84Z" fill="url(#g1)"/>
+    <path d="M102 113C91.5066 123.493 91.5066 140.507 102 151C112.493 161.493 129.507 161.493 140 151L151 140" stroke="#0F172A" stroke-width="18" stroke-linecap="round"/>
+    <path d="M166 113C176.493 102.507 193.507 102.507 204 113C214.493 123.493 214.493 140.507 204 151C193.507 161.493 176.493 161.493 166 151L155 140" stroke="#ECFDF5" stroke-width="18" stroke-linecap="round"/>
+    <circle cx="206" cy="212" r="18" fill="#A7F3D0"/>
+    <path d="M197 212H215" stroke="#065F46" stroke-width="6" stroke-linecap="round"/>
+    <path d="M206 203V221" stroke="#065F46" stroke-width="6" stroke-linecap="round"/>
+    <path d="M74 230C96 216 121 209 149 209H168" stroke="url(#g2)" stroke-width="10" stroke-linecap="round" opacity="0.95"/>
+  </g>
+</svg>

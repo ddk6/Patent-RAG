@@ -1,0 +1,106 @@
+{
+  "mappings": {
+    "properties": {
+      "patentId": {
+        "type": "long"
+      },
+      "patentChunkId": {
+        "type": "long"
+      },
+      "fileMd5": {
+        "type": "keyword"
+      },
+      "fileName": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 512
+          }
+        }
+      },
+      "chunkNo": {
+        "type": "integer"
+      },
+      "textContent": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart"
+      },
+      "sourceType": {
+        "type": "keyword"
+      },
+      "sourceId": {
+        "type": "long"
+      },
+      "claimNo": {
+        "type": "integer"
+      },
+      "independentClaim": {
+        "type": "boolean"
+      },
+      "sectionPath": {
+        "type": "keyword",
+        "ignore_above": 512
+      },
+      "pageNumber": {
+        "type": "integer"
+      },
+      "anchorText": {
+        "type": "text",
+        "index": false
+      },
+      "vector": {
+        "type": "dense_vector",
+        "dims": 2048,
+        "index": true,
+        "similarity": "cosine"
+      },
+      "modelVersion": {
+        "type": "keyword"
+      },
+      "userId": {
+        "type": "keyword"
+      },
+      "orgTag": {
+        "type": "keyword"
+      },
+      "isPublic": {
+        "type": "boolean"
+      },
+      "publicationNo": {
+        "type": "keyword"
+      },
+      "applicationNo": {
+        "type": "keyword"
+      },
+      "title": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart"
+      },
+      "applicant": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 512
+          }
+        }
+      },
+      "patentType": {
+        "type": "keyword"
+      },
+      "publicationDate": {
+        "type": "date",
+        "format": "yyyy-MM-dd"
+      },
+      "applicationDate": {
+        "type": "date",
+        "format": "yyyy-MM-dd"
+      }
+    }
+  }
+}
