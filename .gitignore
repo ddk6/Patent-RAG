@@ -83,3 +83,30 @@ frontend/AutoClaw.pem
 *.pem
 src/main/resources/cert
 /.runtime
+
+
+
+
+# Agent/tool local state
+.claude/
+.qoder/
+
+# Generated reports and document build artifacts
+_docx_build_knowlink/
+generated_reports/
+experiment_manual.pdf
+generate_report.py
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Unrelated temporary experiment files
+_tmp_dlp_ex/
+
+# Local/private Spring configs
+src/main/resources/application1.yml
+src/main/resources/application-local.yml
+src/main/resources/application-secret.yml
