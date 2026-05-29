@@ -262,6 +262,15 @@ function syncTasksFromServer(serverRows: Api.KnowledgeBase.UploadTask[]) {
   });
 }
 
+function extractUploadRows(
+  payload: Api.KnowledgeBase.UploadTask[] | Api.KnowledgeBase.List | null
+): Api.KnowledgeBase.UploadTask[] {
+  if (Array.isArray(payload)) return payload;
+
+  const rows = payload?.data || payload?.content || [];
+  return Array.isArray(rows) ? rows : [];
+}
+
 /** 异步获取列表函数 该函数主要用于更新或初始化上传任务列表 它首先调用getData函数获取数据，然后根据获取到的数据状态更新任务列表 */
 async function getList() {
   await getData();
@@ -323,9 +332,9 @@ async function refreshProcessingRows() {
 
   backgroundRefreshing.value = true;
   try {
-    const { error, data: latestRows } = await apiFn();
-    if (!error && Array.isArray(latestRows)) {
-      syncTasksFromServer(latestRows);
+    const { error, data: latestPayload } = await apiFn();
+    if (!error) {
+      syncTasksFromServer(extractUploadRows(latestPayload));
       updateProcessingRefresh();
     }
   } finally {
