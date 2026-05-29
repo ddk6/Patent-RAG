@@ -12,10 +12,16 @@ import SearchDialog from './modules/search-dialog.vue';
 const appStore = useAppStore();
 const authStore = useAuthStore();
 
+const PROCESSING_REFRESH_INTERVAL = 3000;
+const PROCESSING_REFRESH_TIMEOUT = 5 * 60 * 1000;
+
 // 文件预览相关状态
 const previewVisible = ref(false);
 const previewFileName = ref('');
 const previewFileMd5 = ref('');
+const processingRefreshTimer = ref<ReturnType<typeof setInterval> | null>(null);
+const processingRefreshStartedAt = ref<number | null>(null);
+const backgroundRefreshing = ref(false);
 
 function apiFn() {
   return fakePaginationRequest<Api.KnowledgeBase.List>({ url: '/documents/accessible' });
@@ -102,7 +108,7 @@ const { columns, columnChecks, data, getData, loading } = useTable({
           {renderIcon(row.fileName)}
           <NEllipsis lineClamp={2} tooltip>
             <span
-              class="cursor-pointer hover:text-primary transition-colors"
+              class="cursor-pointer transition-colors hover:text-primary"
               onClick={() => handleFilePreview(row.fileName, row.fileMd5)}
             >
               {row.fileName}
@@ -118,7 +124,7 @@ const { columns, columnChecks, data, getData, loading } = useTable({
       render: row => (
         <NEllipsis tooltip>
           <span
-            class="cursor-pointer hover:text-primary transition-colors font-mono text-3"
+            class="cursor-pointer text-3 font-mono transition-colors hover:text-primary"
             onClick={() => {
               navigator.clipboard.writeText(row.fileMd5);
               window.$message?.success('MD5已复制');
@@ -185,12 +191,7 @@ const { columns, columnChecks, data, getData, loading } = useTable({
       render: row => (
         <div class="flex gap-4">
           {canManageFile(row) ? renderResumeUploadButton(row) : null}
-          <NButton
-            type="primary"
-            ghost
-            size="small"
-            onClick={() => handleFilePreview(row.fileName, row.fileMd5)}
-          >
+          <NButton type="primary" ghost size="small" onClick={() => handleFilePreview(row.fileName, row.fileMd5)}>
             预览
           </NButton>
           {canManageFile(row) ? (
@@ -217,6 +218,10 @@ onMounted(async () => {
   await getList();
 });
 
+onUnmounted(() => {
+  stopProcessingRefresh();
+});
+
 function syncTaskFromServer(target: Api.KnowledgeBase.UploadTask, source: Api.KnowledgeBase.UploadTask) {
   Object.assign(target, {
     fileName: source.fileName,
@@ -238,16 +243,13 @@ function syncTaskFromServer(target: Api.KnowledgeBase.UploadTask, source: Api.Kn
   });
 }
 
-/** 异步获取列表函数 该函数主要用于更新或初始化上传任务列表 它首先调用getData函数获取数据，然后根据获取到的数据状态更新任务列表 */
-async function getList() {
-  await getData();
-
-  if (data.value.length === 0) {
+function syncTasksFromServer(serverRows: Api.KnowledgeBase.UploadTask[]) {
+  if (serverRows.length === 0) {
     tasks.value = [];
     return;
   }
 
-  data.value.forEach(item => {
+  serverRows.forEach(item => {
     const index = tasks.value.findIndex(task => task.fileMd5 === item.fileMd5);
     if (index !== -1) {
       syncTaskFromServer(tasks.value[index], item);
@@ -259,6 +261,88 @@ async function getList() {
     }
   });
 }
+
+/** 异步获取列表函数 该函数主要用于更新或初始化上传任务列表 它首先调用getData函数获取数据，然后根据获取到的数据状态更新任务列表 */
+async function getList() {
+  await getData();
+  syncTasksFromServer(data.value);
+  updateProcessingRefresh();
+}
+
+function hasPendingProcessingResult(row: Api.KnowledgeBase.UploadTask) {
+  if (row.status !== UploadStatus.Completed) return false;
+
+  const hasEstimatedUsage = Boolean(row.estimatedEmbeddingTokens || row.estimatedChunkCount);
+  const missingActualUsage = hasEstimatedUsage && !row.actualEmbeddingTokens && !row.actualChunkCount;
+  const missingPatentQuality = row.documentType === 'PATENT' && !row.patentParseQuality;
+
+  return missingActualUsage || missingPatentQuality;
+}
+
+function shouldRefreshProcessingRows() {
+  return tasks.value.some(hasPendingProcessingResult);
+}
+
+function startProcessingRefresh() {
+  if (processingRefreshTimer.value) return;
+
+  processingRefreshStartedAt.value = Date.now();
+  processingRefreshTimer.value = setInterval(() => {
+    refreshProcessingRows();
+  }, PROCESSING_REFRESH_INTERVAL);
+}
+
+function stopProcessingRefresh() {
+  if (!processingRefreshTimer.value) return;
+
+  clearInterval(processingRefreshTimer.value);
+  processingRefreshTimer.value = null;
+  processingRefreshStartedAt.value = null;
+}
+
+function updateProcessingRefresh() {
+  if (shouldRefreshProcessingRows()) {
+    startProcessingRefresh();
+  } else {
+    stopProcessingRefresh();
+  }
+}
+
+async function refreshProcessingRows() {
+  if (!shouldRefreshProcessingRows()) {
+    stopProcessingRefresh();
+    return;
+  }
+
+  if (processingRefreshStartedAt.value && Date.now() - processingRefreshStartedAt.value > PROCESSING_REFRESH_TIMEOUT) {
+    stopProcessingRefresh();
+    return;
+  }
+
+  if (backgroundRefreshing.value) return;
+
+  backgroundRefreshing.value = true;
+  try {
+    const { error, data: latestRows } = await apiFn();
+    if (!error && Array.isArray(latestRows)) {
+      syncTasksFromServer(latestRows);
+      updateProcessingRefresh();
+    }
+  } finally {
+    backgroundRefreshing.value = false;
+  }
+}
+
+watch(
+  () =>
+    tasks.value
+      .map(
+        task =>
+          `${task.fileMd5}:${task.status}:${task.estimatedEmbeddingTokens ?? ''}:${task.estimatedChunkCount ?? ''}:${task.actualEmbeddingTokens ?? ''}:${task.actualChunkCount ?? ''}:${task.documentType ?? ''}:${task.patentParseQuality?.overallScore ?? ''}`
+      )
+      .join('|'),
+  updateProcessingRefresh
+);
 
 async function handleDelete(fileMd5: string) {
   const index = tasks.value.findIndex(task => task.fileMd5 === fileMd5);
@@ -312,7 +396,7 @@ function renderEstimatedEmbeddingUsage(row: Api.KnowledgeBase.UploadTask) {
   const estimatedTokenLabel = Number(row.estimatedEmbeddingTokens).toLocaleString();
   const estimatedChunkLabel = Number(row.estimatedChunkCount || 0).toLocaleString();
   return (
-    <div class="text-xs leading-5 text-stone-600">
+    <div class="text-xs text-stone-600 leading-5">
       <div>{estimatedTokenLabel} Tokens</div>
       <div class="text-stone-400">{estimatedChunkLabel} 个切片</div>
     </div>
@@ -327,7 +411,7 @@ function renderActualEmbeddingUsage(row: Api.KnowledgeBase.UploadTask) {
   const actualTokenLabel = Number(row.actualEmbeddingTokens).toLocaleString();
   const actualChunkLabel = Number(row.actualChunkCount || 0).toLocaleString();
   return (
-    <div class="text-xs leading-5 text-emerald-700">
+    <div class="text-xs text-emerald-700 leading-5">
       <div>{actualTokenLabel} Tokens</div>
       <div class="text-stone-400">{actualChunkLabel} 个切片</div>
     </div>
@@ -425,7 +509,7 @@ async function onBeforeUpload(
     </NCard>
     <UploadDialog v-model:visible="uploadVisible" />
     <SearchDialog v-model:visible="searchVisible" />
-    
+
     <!-- 文件预览弹窗 -->
     <NModal v-model:show="previewVisible" class="document-preview-modal" :auto-focus="false">
       <div class="document-preview-modal-shell">
